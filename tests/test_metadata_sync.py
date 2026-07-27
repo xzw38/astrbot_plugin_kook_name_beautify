@@ -44,6 +44,9 @@ class MetadataSyncTests(unittest.TestCase):
         main_text = (ROOT / "main.py").read_text(encoding="utf-8")
         self.assertIn('@filter.llm_tool(name="kook_beautify_channels")', main_text)
         self.assertIn("Args:\n            instruction(string):", main_text)
+        self.assertIn('@filter.llm_tool(name="kook_apply_beautify_plan")', main_text)
+        self.assertIn('@filter.llm_tool(name="kook_rollback_beautify_plan")', main_text)
+        self.assertGreaterEqual(main_text.count("confirm(boolean):"), 2)
 
 
 if __name__ == "__main__":

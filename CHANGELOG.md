@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.3 - 2026-07-28
+
+- 新增 `kook_apply_beautify_plan` LLM 工具，使明确确认可通过 AI 工具执行，不再完全依赖斜杠命令路由。
+- 新增 `kook_rollback_beautify_plan` LLM 撤销工具。
+- 执行和撤销工具同时校验 `confirm=true`、当前原始消息中的动作文字及相同方案编号。
+- 新增 `/kook_beautify_confirm` 和 `/kook_beautify_rollback` 英文备用命令。
+
 ## 0.1.2 - 2026-07-28
 
 - 增加可配置的 KOOK API、改名进度、冲突检查和回滚调试日志。

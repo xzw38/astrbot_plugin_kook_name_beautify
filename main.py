@@ -35,7 +35,7 @@ except ImportError:  # Allow direct local imports during standalone development.
     from kook_api import KookApiClient, KookApiError
 
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 
 
 @register(
@@ -106,6 +106,20 @@ class KookNameBeautifyPlugin(Star):
         sender_id = self._sender_id(event)
         if sender_id not in self.allowed_user_ids:
             raise PlanError("你的用户 ID 不在插件 allowed_user_ids 白名单中。")
+
+    @staticmethod
+    def _has_explicit_plan_action(
+        event: AstrMessageEvent,
+        plan_id: str,
+        markers: tuple[str, ...],
+    ) -> bool:
+        message = str(getattr(event, "message_str", "") or "").strip().lower()
+        normalized_plan_id = str(plan_id or "").strip().lower()
+        return bool(
+            normalized_plan_id
+            and normalized_plan_id in message
+            and any(marker.lower() in message for marker in markers)
+        )
 
     @staticmethod
     def _check_kook_event(event: AstrMessageEvent) -> None:
@@ -484,7 +498,8 @@ class KookNameBeautifyPlugin(Star):
         当管理员用自然语言要求整理、美化、统一或重命名 KOOK 的分组、文字频道、语音频道时调用。
         instruction 必须完整保留管理员指定的主题、风格、语言和例外要求。
         本工具只生成预览，不会直接修改频道。返回结果中会提供确认命令，必须让管理员自行发送该命令。
-        不要声称已经修改完成，也不要代替管理员确认。
+        用户明确回复“确认执行方案 <编号>”或发送确认命令后，应调用 kook_apply_beautify_plan。
+        不要在用户尚未明确确认时调用执行工具，也不要声称已经修改完成。
 
         Args:
             instruction(string): 管理员对主题、风格、语言、分隔符和例外频道的完整自然语言要求。
@@ -498,6 +513,93 @@ class KookNameBeautifyPlugin(Star):
         except Exception as exc:
             logger.exception("KOOK beautify tool failed")
             return f"KOOK 频道美化预览生成失败：{exc.__class__.__name__}"
+
+    @filter.llm_tool(name="kook_apply_beautify_plan")
+    async def kook_apply_beautify_plan(
+        self,
+        event: AstrMessageEvent,
+        plan_id: str,
+        confirm: bool = False,
+    ) -> str:
+        """执行管理员已经明确确认的 KOOK 频道美化方案。
+
+        只有当前用户消息明确包含同一个方案编号，并且说“确认执行方案”、发送 /kook美化确认
+        或 /kook_beautify_confirm 时才能调用。必须把 confirm 设为 true。不能根据之前的对话、默认同意
+        或模型自己的判断代替用户确认。此工具会实际修改 KOOK 频道名称。
+
+        Args:
+            plan_id(string): 美化预览中显示的八位方案编号。
+            confirm(boolean): 用户已在当前消息中明确确认执行时传 true，否则传 false。
+        """
+        plan_id = str(plan_id or "").strip().lower()
+        if not bool(confirm):
+            return "未执行：confirm 必须为 true，请先让管理员明确确认这个方案。"
+        if not self._has_explicit_plan_action(
+            event,
+            plan_id,
+            (
+                "/kook美化确认",
+                "/kook_beautify_confirm",
+                "确认执行方案",
+                "确认执行",
+                "执行方案",
+            ),
+        ):
+            return (
+                "未执行：当前用户消息没有明确确认这个方案编号。"
+                f"请让管理员回复“确认执行方案 {plan_id}”。"
+            )
+        try:
+            return await self._apply_plan(event, plan_id)
+        except (PlanError, KookApiError) as exc:
+            logger.error("[KOOK Beautify Tool] apply rejected plan=%s error=%s", plan_id, exc)
+            return f"执行美化方案失败：{exc}"
+        except Exception as exc:
+            logger.exception("KOOK beautify apply tool failed")
+            return f"执行美化方案失败：{exc.__class__.__name__}"
+
+    @filter.llm_tool(name="kook_rollback_beautify_plan")
+    async def kook_rollback_beautify_plan(
+        self,
+        event: AstrMessageEvent,
+        plan_id: str,
+        confirm: bool = False,
+    ) -> str:
+        """撤销管理员已经明确确认撤销的 KOOK 频道美化方案。
+
+        只有当前用户消息明确包含同一个方案编号，并且说“确认撤销方案”、发送 /kook美化撤销
+        或 /kook_beautify_rollback 时才能调用。必须把 confirm 设为 true。此工具会实际恢复原频道名称。
+
+        Args:
+            plan_id(string): 已执行美化方案的八位方案编号。
+            confirm(boolean): 用户已在当前消息中明确确认撤销时传 true，否则传 false。
+        """
+        plan_id = str(plan_id or "").strip().lower()
+        if not bool(confirm):
+            return "未撤销：confirm 必须为 true，请先让管理员明确确认撤销。"
+        if not self._has_explicit_plan_action(
+            event,
+            plan_id,
+            (
+                "/kook美化撤销",
+                "/kook_beautify_rollback",
+                "确认撤销方案",
+                "确认撤销",
+                "撤销方案",
+            ),
+        ):
+            return (
+                "未撤销：当前用户消息没有明确确认撤销这个方案编号。"
+                f"请让管理员回复“确认撤销方案 {plan_id}”。"
+            )
+        try:
+            return await self._rollback_plan(event, plan_id)
+        except (PlanError, KookApiError) as exc:
+            logger.error("[KOOK Beautify Tool] rollback rejected plan=%s error=%s", plan_id, exc)
+            return f"撤销美化方案失败：{exc}"
+        except Exception as exc:
+            logger.exception("KOOK beautify rollback tool failed")
+            return f"撤销美化方案失败：{exc.__class__.__name__}"
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.platform_adapter_type(filter.PlatformAdapterType.KOOK)
@@ -531,6 +633,20 @@ class KookNameBeautifyPlugin(Star):
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.platform_adapter_type(filter.PlatformAdapterType.KOOK)
+    @filter.command("kook_beautify_confirm")
+    async def confirm_command_alias(self, event: AstrMessageEvent):
+        plan_id = str(event.message_str or "").removeprefix("/kook_beautify_confirm").strip().lower()
+        try:
+            yield event.plain_result(await self._apply_plan(event, plan_id))
+        except (PlanError, KookApiError) as exc:
+            logger.error("[KOOK Beautify] confirmation alias rejected plan=%s error=%s", plan_id, exc)
+            yield event.plain_result(f"执行美化方案失败：{exc}")
+        except Exception as exc:
+            logger.exception("KOOK beautify confirmation alias failed")
+            yield event.plain_result(f"执行美化方案失败：{exc.__class__.__name__}")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.platform_adapter_type(filter.PlatformAdapterType.KOOK)
     @filter.command("kook美化撤销")
     async def rollback_command(self, event: AstrMessageEvent):
         plan_id = str(event.message_str or "").removeprefix("/kook美化撤销").strip().lower()
@@ -541,6 +657,20 @@ class KookNameBeautifyPlugin(Star):
             yield event.plain_result(f"撤销美化方案失败：{exc}")
         except Exception as exc:
             logger.exception("KOOK beautify rollback failed")
+            yield event.plain_result(f"撤销美化方案失败：{exc.__class__.__name__}")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.platform_adapter_type(filter.PlatformAdapterType.KOOK)
+    @filter.command("kook_beautify_rollback")
+    async def rollback_command_alias(self, event: AstrMessageEvent):
+        plan_id = str(event.message_str or "").removeprefix("/kook_beautify_rollback").strip().lower()
+        try:
+            yield event.plain_result(await self._rollback_plan(event, plan_id))
+        except (PlanError, KookApiError) as exc:
+            logger.error("[KOOK Beautify] rollback alias rejected plan=%s error=%s", plan_id, exc)
+            yield event.plain_result(f"撤销美化方案失败：{exc}")
+        except Exception as exc:
+            logger.exception("KOOK beautify rollback alias failed")
             yield event.plain_result(f"撤销美化方案失败：{exc.__class__.__name__}")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -564,6 +694,8 @@ class KookNameBeautifyPlugin(Star):
             "/kook美化 <自然语言要求>  生成预览\n"
             "/kook美化确认 <方案编号>  执行改名\n"
             "/kook美化撤销 <方案编号>  恢复原名称\n"
+            "/kook_beautify_confirm <方案编号>  英文确认命令\n"
+            "/kook_beautify_rollback <方案编号>  英文撤销命令\n"
             "/kook频道列表  查看当前频道和 ID\n\n"
-            "也可以直接对 AI 说“把这个服务器的频道统一成简约科技风”，AI 会调用本插件生成预览。"
+            "也可以直接对 AI 说“把这个服务器的频道统一成简约科技风”，生成预览后回复“确认执行方案 编号”。"
         )

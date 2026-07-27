@@ -56,7 +56,13 @@ KOOK 频道美化预览（方案 a1b2c3d4，共 4 项）
 确认执行：/kook美化确认 a1b2c3d4
 ```
 
-必须由管理员手动发送确认命令。AI 工具本身没有直接执行入口。
+管理员可以手动发送确认命令，也可以直接回复：
+
+```text
+确认执行方案 a1b2c3d4
+```
+
+此时 AI 会调用 `kook_apply_beautify_plan`。执行工具同时检查当前原始消息中的确认文字、相同方案编号、`confirm=true`、KOOK 平台和 AstrBot 管理员身份，不能根据历史消息或模型自己的判断代替用户确认。
 
 ## 命令
 
@@ -64,6 +70,8 @@ KOOK 频道美化预览（方案 a1b2c3d4，共 4 项）
 /kook美化 <自然语言要求>
 /kook美化确认 <方案编号>
 /kook美化撤销 <方案编号>
+/kook_beautify_confirm <方案编号>
+/kook_beautify_rollback <方案编号>
 /kook频道列表
 /kook美化帮助
 ```
