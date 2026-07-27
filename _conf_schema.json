@@ -1,0 +1,76 @@
+{
+  "bot_token": {
+    "description": "KOOK Bot Token",
+    "type": "string",
+    "hint": "通常可从 AstrBot 的 KOOK 适配器自动读取。自动读取失败时，只填写 Token 本体，不要带 Bot 前缀。",
+    "obvious_hint": true,
+    "default": ""
+  },
+  "guild_id": {
+    "description": "默认 KOOK 服务器 ID",
+    "type": "string",
+    "hint": "通常会从当前 KOOK 消息自动识别。识别失败或固定管理一个服务器时填写。",
+    "default": ""
+  },
+  "allowed_user_ids": {
+    "description": "额外管理员白名单",
+    "type": "list",
+    "hint": "留空时使用 AstrBot 管理员权限。填写后，只有同时属于 AstrBot 管理员且在此列表中的用户才能使用插件。",
+    "default": []
+  },
+  "plan_ttl_seconds": {
+    "description": "待确认方案有效期（秒）",
+    "type": "int",
+    "hint": "过期方案不会执行；已执行方案在 AstrBot 重启前仍可撤销。",
+    "default": 600
+  },
+  "max_changes": {
+    "description": "单个方案最大改名数量",
+    "type": "int",
+    "default": 100
+  },
+  "max_name_length": {
+    "description": "频道名称最大字符数",
+    "type": "int",
+    "hint": "AI 方案超过此长度会被拒绝，不会截断后执行。",
+    "default": 50
+  },
+  "custom_planner_prompt": {
+    "description": "自定义频道命名规范",
+    "type": "text",
+    "hint": "可填写长期固定的 Emoji、分隔符、语言或品牌命名规则。",
+    "default": ""
+  },
+  "llm_timeout": {
+    "description": "AI 生成方案超时（秒）",
+    "type": "int",
+    "default": 60
+  },
+  "llm_temperature": {
+    "description": "AI 规划温度",
+    "type": "float",
+    "hint": "较低的值更稳定，建议保持 0.1 到 0.5。",
+    "default": 0.3
+  },
+  "api_base_url": {
+    "description": "KOOK API v3 地址",
+    "type": "string",
+    "default": "https://www.kookapp.cn/api/v3"
+  },
+  "request_timeout": {
+    "description": "KOOK API 请求超时（秒）",
+    "type": "int",
+    "default": 20
+  },
+  "request_interval_ms": {
+    "description": "批量改名请求间隔（毫秒）",
+    "type": "int",
+    "hint": "用于降低触发 KOOK API 限流的概率。",
+    "default": 350
+  },
+  "max_rate_limit_retries": {
+    "description": "KOOK API 限流重试次数",
+    "type": "int",
+    "default": 2
+  }
+}
