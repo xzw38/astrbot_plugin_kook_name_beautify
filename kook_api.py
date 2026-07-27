@@ -8,7 +8,10 @@ from typing import Any
 
 import aiohttp
 
-from beautify import Channel
+try:
+    from .beautify import Channel
+except ImportError:  # Allow direct local imports during standalone development.
+    from beautify import Channel
 
 
 class KookApiError(RuntimeError):

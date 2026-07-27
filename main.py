@@ -9,20 +9,33 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
 
-from beautify import (
-    PLANNER_SYSTEM_PROMPT,
-    Channel,
-    PlanError,
-    PlanStore,
-    RenamePlan,
-    build_planner_prompt,
-    format_plan_preview,
-    parse_rename_plan,
-)
-from kook_api import KookApiClient, KookApiError
+try:
+    from .beautify import (
+        PLANNER_SYSTEM_PROMPT,
+        Channel,
+        PlanError,
+        PlanStore,
+        RenamePlan,
+        build_planner_prompt,
+        format_plan_preview,
+        parse_rename_plan,
+    )
+    from .kook_api import KookApiClient, KookApiError
+except ImportError:  # Allow direct local imports during standalone development.
+    from beautify import (
+        PLANNER_SYSTEM_PROMPT,
+        Channel,
+        PlanError,
+        PlanStore,
+        RenamePlan,
+        build_planner_prompt,
+        format_plan_preview,
+        parse_rename_plan,
+    )
+    from kook_api import KookApiClient, KookApiError
 
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 
 @register(
