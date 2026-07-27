@@ -35,7 +35,7 @@ except ImportError:  # Allow direct local imports during standalone development.
     from kook_api import KookApiClient, KookApiError
 
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 
 @register(
@@ -57,6 +57,7 @@ class KookNameBeautifyPlugin(Star):
         self.request_timeout = max(5, int(self.config.get("request_timeout", 20)))
         self.request_interval_ms = max(0, int(self.config.get("request_interval_ms", 350)))
         self.max_rate_limit_retries = max(0, int(self.config.get("max_rate_limit_retries", 2)))
+        self.debug_logging = bool(self.config.get("debug_logging", True))
         self.max_changes = min(200, max(1, int(self.config.get("max_changes", 100))))
         self.max_name_length = min(100, max(8, int(self.config.get("max_name_length", 50))))
         self.llm_timeout = max(10, int(self.config.get("llm_timeout", 60)))
@@ -77,7 +78,13 @@ class KookNameBeautifyPlugin(Star):
             timeout_seconds=self.request_timeout,
             request_interval_ms=self.request_interval_ms,
             max_rate_limit_retries=self.max_rate_limit_retries,
+            debug=self.debug_logging,
+            debug_log=logger.info,
         )
+
+    def _debug(self, message: str, *args: Any) -> None:
+        if self.debug_logging:
+            logger.info(message, *args)
 
     @staticmethod
     def _sender_id(event: AstrMessageEvent) -> str:
@@ -119,22 +126,26 @@ class KookNameBeautifyPlugin(Star):
 
     def _resolve_token(self, event: AstrMessageEvent) -> str:
         if self.bot_token:
+            self._debug("[KOOK Beautify] token source=plugin_config")
             return self.bot_token
         client = getattr(event, "client", None)
         for attr in ("token", "bot_token"):
             value = getattr(client, attr, "")
             if isinstance(value, str) and value.strip():
+                self._debug("[KOOK Beautify] token source=event.client.%s", attr)
                 return value.strip()
         client_config = getattr(client, "config", None)
         if isinstance(client_config, dict):
             for key in ("token", "bot_token"):
                 value = client_config.get(key)
                 if isinstance(value, str) and value.strip():
+                    self._debug("[KOOK Beautify] token source=event.client.config[%s]", key)
                     return value.strip()
         else:
             for attr in ("token", "bot_token"):
                 value = getattr(client_config, attr, "")
                 if isinstance(value, str) and value.strip():
+                    self._debug("[KOOK Beautify] token source=event.client.config.%s", attr)
                     return value.strip()
         raise KookApiError("无法读取 KOOK Bot Token，请在插件配置中填写 bot_token。")
 
@@ -160,18 +171,22 @@ class KookNameBeautifyPlugin(Star):
 
     def _resolve_guild_id(self, event: AstrMessageEvent, requested: str = "") -> str:
         if str(requested).strip():
+            self._debug("[KOOK Beautify] guild source=tool_argument guild=%s", str(requested).strip())
             return str(requested).strip()
         if self.default_guild_id:
+            self._debug("[KOOK Beautify] guild source=plugin_config guild=%s", self.default_guild_id)
             return self.default_guild_id
         for source in (event, getattr(event, "message_obj", None)):
             for attr in ("guild_id", "server_id"):
                 value = getattr(source, attr, "")
                 if isinstance(value, (str, int)) and str(value).strip():
+                    self._debug("[KOOK Beautify] guild source=event.%s guild=%s", attr, str(value).strip())
                     return str(value).strip()
         message_obj = getattr(event, "message_obj", None)
         for attr in ("raw_message", "raw_data", "message", "extra"):
             result = self._find_guild_id(getattr(message_obj, attr, None))
             if result:
+                self._debug("[KOOK Beautify] guild source=message_obj.%s guild=%s", attr, result)
                 return result
         raise KookApiError("无法从当前消息识别服务器 ID，请在插件配置中填写 guild_id。")
 
@@ -274,6 +289,13 @@ class KookNameBeautifyPlugin(Star):
         if plan.applied:
             raise PlanError("这个方案已经执行过了。")
         token = self._resolve_token(event)
+        self._debug(
+            "[KOOK Beautify] apply start plan=%s guild=%s changes=%s user=%s",
+            plan.id,
+            plan.guild_id,
+            len(plan.changes),
+            self._sender_id(event),
+        )
         async with self._mutation_lock:
             async with self._api_client(token) as client:
                 current_channels = await client.list_channels(plan.guild_id)
@@ -284,22 +306,72 @@ class KookNameBeautifyPlugin(Star):
                     if current_names.get(change.channel_id) != change.old_name
                 ]
                 if conflicts:
+                    logger.error(
+                        "[KOOK Beautify] apply conflict plan=%s channels=%s",
+                        plan.id,
+                        conflicts[:8],
+                    )
                     raise PlanError(
                         "执行前检查发现频道已被修改，方案未执行：" + "、".join(conflicts[:8])
                     )
                 applied = []
                 try:
-                    for change in plan.changes:
+                    for index, change in enumerate(plan.changes, start=1):
+                        self._debug(
+                            "[KOOK Beautify] update start plan=%s item=%s/%s channel=%s old=%r new=%r",
+                            plan.id,
+                            index,
+                            len(plan.changes),
+                            change.channel_id,
+                            change.old_name,
+                            change.new_name,
+                        )
                         await client.update_channel_name(change.channel_id, change.new_name)
                         applied.append(change)
+                        self._debug(
+                            "[KOOK Beautify] update success plan=%s item=%s/%s channel=%s",
+                            plan.id,
+                            index,
+                            len(plan.changes),
+                            change.channel_id,
+                        )
                 except Exception as exc:
+                    failed_index = len(applied) + 1
+                    failed_channel = plan.changes[failed_index - 1].channel_id if failed_index <= len(plan.changes) else "unknown"
+                    logger.error(
+                        "[KOOK Beautify] update failed plan=%s item=%s/%s channel=%s error=%s",
+                        plan.id,
+                        failed_index,
+                        len(plan.changes),
+                        failed_channel,
+                        exc,
+                    )
                     rollback_failed = []
                     for change in reversed(applied):
                         try:
+                            self._debug(
+                                "[KOOK Beautify] auto-rollback start plan=%s channel=%s restore=%r",
+                                plan.id,
+                                change.channel_id,
+                                change.old_name,
+                            )
                             await client.update_channel_name(change.channel_id, change.old_name)
+                            self._debug(
+                                "[KOOK Beautify] auto-rollback success plan=%s channel=%s",
+                                plan.id,
+                                change.channel_id,
+                            )
                         except Exception:
                             rollback_failed.append(change.new_name)
-                    detail = f"执行到第 {len(applied) + 1} 项时失败，已尝试恢复之前的名称。"
+                            logger.exception(
+                                "[KOOK Beautify] auto-rollback failed plan=%s channel=%s",
+                                plan.id,
+                                change.channel_id,
+                            )
+                    detail = (
+                        f"执行到第 {failed_index} 项时失败：{exc}。"
+                        "已尝试恢复之前的名称。"
+                    )
                     if rollback_failed:
                         detail += " 以下频道自动恢复失败：" + "、".join(rollback_failed)
                     raise KookApiError(detail) from exc
@@ -321,6 +393,13 @@ class KookNameBeautifyPlugin(Star):
         if plan.rolled_back:
             raise PlanError("这个方案已经撤销过了。")
         token = self._resolve_token(event)
+        self._debug(
+            "[KOOK Beautify] rollback start plan=%s guild=%s changes=%s user=%s",
+            plan.id,
+            plan.guild_id,
+            len(plan.changes),
+            self._sender_id(event),
+        )
         async with self._mutation_lock:
             async with self._api_client(token) as client:
                 current_channels = await client.list_channels(plan.guild_id)
@@ -331,22 +410,48 @@ class KookNameBeautifyPlugin(Star):
                     if current_names.get(change.channel_id) != change.new_name
                 ]
                 if conflicts:
+                    logger.error(
+                        "[KOOK Beautify] rollback conflict plan=%s channels=%s",
+                        plan.id,
+                        conflicts[:8],
+                    )
                     raise PlanError(
                         "撤销前检查发现频道名称又被修改，未自动覆盖：" + "、".join(conflicts[:8])
                     )
                 restored_changes = []
                 try:
-                    for change in reversed(plan.changes):
+                    for index, change in enumerate(reversed(plan.changes), start=1):
+                        self._debug(
+                            "[KOOK Beautify] rollback update start plan=%s item=%s/%s channel=%s current=%r restore=%r",
+                            plan.id,
+                            index,
+                            len(plan.changes),
+                            change.channel_id,
+                            change.new_name,
+                            change.old_name,
+                        )
                         await client.update_channel_name(change.channel_id, change.old_name)
                         restored_changes.append(change)
+                        self._debug(
+                            "[KOOK Beautify] rollback update success plan=%s channel=%s",
+                            plan.id,
+                            change.channel_id,
+                        )
                 except Exception as exc:
+                    logger.error(
+                        "[KOOK Beautify] rollback update failed plan=%s restored=%s/%s error=%s",
+                        plan.id,
+                        len(restored_changes),
+                        len(plan.changes),
+                        exc,
+                    )
                     compensation_failed = []
                     for change in reversed(restored_changes):
                         try:
                             await client.update_channel_name(change.channel_id, change.new_name)
                         except Exception:
                             compensation_failed.append(change.old_name)
-                    detail = "撤销过程中发生错误，已尝试恢复到撤销前状态。"
+                    detail = f"撤销过程中发生错误：{exc}。已尝试恢复到撤销前状态。"
                     if compensation_failed:
                         detail += " 以下频道恢复失败：" + "、".join(compensation_failed)
                     raise KookApiError(detail) from exc
@@ -418,6 +523,7 @@ class KookNameBeautifyPlugin(Star):
         try:
             yield event.plain_result(await self._apply_plan(event, plan_id))
         except (PlanError, KookApiError) as exc:
+            logger.error("[KOOK Beautify] confirmation rejected plan=%s error=%s", plan_id, exc)
             yield event.plain_result(f"执行美化方案失败：{exc}")
         except Exception as exc:
             logger.exception("KOOK beautify confirmation failed")
@@ -431,6 +537,7 @@ class KookNameBeautifyPlugin(Star):
         try:
             yield event.plain_result(await self._rollback_plan(event, plan_id))
         except (PlanError, KookApiError) as exc:
+            logger.error("[KOOK Beautify] rollback rejected plan=%s error=%s", plan_id, exc)
             yield event.plain_result(f"撤销美化方案失败：{exc}")
         except Exception as exc:
             logger.exception("KOOK beautify rollback failed")

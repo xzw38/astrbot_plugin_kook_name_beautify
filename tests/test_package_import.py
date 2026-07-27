@@ -55,7 +55,7 @@ class PackageImportTests(unittest.TestCase):
             package.__path__ = [{str(ROOT)!r}]
             sys.modules[package.__name__] = package
             module = importlib.import_module("astrbot_plugin_kook_name_beautify.main")
-            assert module.__version__ == "0.1.1"
+            assert module.__version__ == "0.1.2"
             """
         )
         result = subprocess.run(

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.2 - 2026-07-28
+
+- 增加可配置的 KOOK API、改名进度、冲突检查和回滚调试日志。
+- 执行或撤销失败时保留 KOOK API 的原始错误码与错误消息。
+- 调试日志不会输出 Bot Token 或 Authorization。
+
 ## 0.1.1 - 2026-07-28
 
 - 修复 AstrBot 以插件包路径加载时无法导入 `beautify` 和 `kook_api` 的问题。

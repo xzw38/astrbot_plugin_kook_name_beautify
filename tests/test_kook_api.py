@@ -63,6 +63,25 @@ class FakeKookApiClient(KookApiClient):
 
 
 class KookApiClientTests(unittest.IsolatedAsyncioTestCase):
+    async def test_debug_callback_is_opt_in(self):
+        messages = []
+        client = KookApiClient(
+            "test-token",
+            debug=True,
+            debug_log=lambda message, *args: messages.append(message % args),
+        )
+        client._debug("request path=%s", "/channel/update")
+        self.assertEqual(messages, ["request path=/channel/update"])
+
+        quiet_messages = []
+        quiet_client = KookApiClient(
+            "test-token",
+            debug=False,
+            debug_log=lambda message, *args: quiet_messages.append(message % args),
+        )
+        quiet_client._debug("should not be logged")
+        self.assertEqual(quiet_messages, [])
+
     async def test_list_channels_paginates_both_types_and_deduplicates_categories(self):
         client = FakeKookApiClient()
         channels = await client.list_channels("guild")

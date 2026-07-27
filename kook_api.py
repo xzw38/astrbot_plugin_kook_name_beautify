@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Any
+from typing import Any, Callable
 
 import aiohttp
 
@@ -27,14 +27,22 @@ class KookApiClient:
         timeout_seconds: int = 20,
         request_interval_ms: int = 350,
         max_rate_limit_retries: int = 2,
+        debug: bool = False,
+        debug_log: Callable[..., None] | None = None,
     ):
         self.token = str(token).strip()
         self.base_url = str(base_url).rstrip("/")
         self.timeout_seconds = max(5, int(timeout_seconds))
         self.request_interval = max(0, int(request_interval_ms)) / 1000
         self.max_rate_limit_retries = max(0, int(max_rate_limit_retries))
+        self.debug = bool(debug)
+        self.debug_log = debug_log
         self._session: aiohttp.ClientSession | None = None
         self._last_request_at = 0.0
+
+    def _debug(self, message: str, *args: Any) -> None:
+        if self.debug and self.debug_log is not None:
+            self.debug_log(message, *args)
 
     async def __aenter__(self) -> "KookApiClient":
         if not self.token:
@@ -73,9 +81,25 @@ class KookApiClient:
         url = f"{self.base_url}/{path.lstrip('/')}"
         for attempt in range(self.max_rate_limit_retries + 1):
             await self._throttle()
+            self._debug(
+                "[KOOK API] request method=%s path=/%s attempt=%s params=%s body=%s",
+                method,
+                path.lstrip("/"),
+                attempt + 1,
+                params or {},
+                json_body or {},
+            )
             try:
                 async with self._session.request(method, url, params=params, json=json_body) as response:
                     self._last_request_at = time.monotonic()
+                    self._debug(
+                        "[KOOK API] response path=/%s http=%s remaining=%s reset=%s bucket=%s",
+                        path.lstrip("/"),
+                        response.status,
+                        response.headers.get("X-Rate-Limit-Remaining", "-"),
+                        response.headers.get("X-Rate-Limit-Reset", "-"),
+                        response.headers.get("X-Rate-Limit-Bucket", "-"),
+                    )
                     if response.status == 429:
                         await response.read()
                         if attempt >= self.max_rate_limit_retries:
@@ -85,6 +109,13 @@ class KookApiClient:
                             wait_seconds = max(0.5, min(float(reset), 30.0))
                         except ValueError:
                             wait_seconds = 1.0
+                        self._debug(
+                            "[KOOK API] rate limited path=/%s wait=%.2fs retry=%s/%s",
+                            path.lstrip("/"),
+                            wait_seconds,
+                            attempt + 1,
+                            self.max_rate_limit_retries,
+                        )
                         await asyncio.sleep(wait_seconds)
                         continue
                     try:
@@ -99,6 +130,12 @@ class KookApiClient:
                         raise KookApiError(f"KOOK API 请求失败（HTTP {response.status}）：{message or '未知错误'}")
                     if not isinstance(payload, dict):
                         raise KookApiError("KOOK API 返回格式不正确。")
+                    self._debug(
+                        "[KOOK API] payload path=/%s code=%s message=%s",
+                        path.lstrip("/"),
+                        payload.get("code"),
+                        payload.get("message", ""),
+                    )
                     if int(payload.get("code", -1)) != 0:
                         raise KookApiError(
                             f"KOOK API 错误 {payload.get('code')}：{payload.get('message', '未知错误')}"

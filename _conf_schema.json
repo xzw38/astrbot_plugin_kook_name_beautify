@@ -72,5 +72,11 @@
     "description": "KOOK API 限流重试次数",
     "type": "int",
     "default": 2
+  },
+  "debug_logging": {
+    "description": "输出 KOOK 频道美化调试日志",
+    "type": "bool",
+    "hint": "记录请求路径、状态码、KOOK 错误码、频道改名进度和回滚结果，不会记录 Bot Token 或 Authorization。",
+    "default": true
   }
 }

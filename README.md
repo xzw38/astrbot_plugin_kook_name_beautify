@@ -86,6 +86,25 @@ KOOK 频道美化预览（方案 a1b2c3d4，共 4 项）
 
 当前版本只修改现有频道和分组的名称，不创建、删除、移动频道，也不修改权限、密码或慢速模式。这是刻意限制：频道结构和权限变更的影响更大，后续应使用独立的结构方案和二次确认流程实现。
 
+## 调试改名失败
+
+`debug_logging` 默认开启。确认方案后，AstrBot 日志会依次出现：
+
+```text
+[KOOK Beautify] apply start ...
+[KOOK Beautify] update start ...
+[KOOK API] request method=POST path=/channel/update ...
+[KOOK API] response path=/channel/update http=...
+[KOOK API] payload path=/channel/update code=... message=...
+```
+
+日志不会输出 Bot Token 或 Authorization。排查时重点查看第一条 `update failed` 及它前面的 `http`、`code`、`message`：
+
+- 能读取但更新返回权限错误：检查机器人在目标服务器的角色是否具有管理频道权限。
+- 返回 `429`：插件会按 `X-Rate-Limit-Reset` 自动等待并重试。
+- 返回频道不存在或执行冲突：重新生成方案，避免使用频道已变化的旧方案。
+- 无法识别服务器：在插件配置中填写 `guild_id`。
+
 ## KOOK API 依据
 
 - [HTTP 接口规范与 Bot 鉴权](https://developer.kookapp.cn/doc/reference)
