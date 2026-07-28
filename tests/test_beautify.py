@@ -6,6 +6,7 @@ from beautify import (
     PlanError,
     build_channel_inventory,
     build_planner_prompt,
+    extract_explicit_channel_ids,
     instruction_requires_creation,
     parse_rename_plan,
     parse_structure_plan,
@@ -136,6 +137,20 @@ class RenamePlanTests(unittest.TestCase):
         self.assertEqual(len(renames), 1)
         self.assertEqual([item.kind for item in creates], ["category", "text", "voice"])
         self.assertEqual(creates[2].limit_amount, 25)
+
+    def test_explicit_numeric_parent_is_allowed_for_kook_validation(self):
+        instruction = "在分组 1305474374831940 下新建语音频道"
+        self.assertEqual(extract_explicit_channel_ids(instruction), ["1305474374831940"])
+        prompt = build_planner_prompt(instruction, CHANNELS)
+        self.assertIn('<explicit_parent_refs_json>\n["1305474374831940"]', prompt)
+        _, creates = parse_structure_plan(
+            '{"renames":[],"creates":[{"temp_id":"room","name":"歌房二号",'
+            '"kind":"voice","parent_ref":"1305474374831940"}]}',
+            CHANNELS,
+            require_creates=True,
+            allowed_parent_refs=extract_explicit_channel_ids(instruction),
+        )
+        self.assertEqual(creates[0].parent_ref, "1305474374831940")
 
     def test_create_parent_must_be_category(self):
         with self.assertRaisesRegex(PlanError, "parent_ref 未引用有效分组"):

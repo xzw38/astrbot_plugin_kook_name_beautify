@@ -18,6 +18,7 @@ try:
         PlanStore,
         RenamePlan,
         build_planner_prompt,
+        extract_explicit_channel_ids,
         format_plan_preview,
         instruction_requires_creation,
         parse_structure_plan,
@@ -32,6 +33,7 @@ except ImportError:  # Allow direct local imports during standalone development.
         PlanStore,
         RenamePlan,
         build_planner_prompt,
+        extract_explicit_channel_ids,
         format_plan_preview,
         instruction_requires_creation,
         parse_structure_plan,
@@ -39,7 +41,7 @@ except ImportError:  # Allow direct local imports during standalone development.
     from kook_api import KookApiClient, KookApiError
 
 
-__version__ = "0.2.3"
+__version__ = "0.2.4"
 
 
 @register(
@@ -255,7 +257,7 @@ class KookNameBeautifyPlugin(Star):
                 "\n\n上一次方案校验失败："
                 + validation_error
                 + "\n请完全丢弃上一次输出并重新生成完整 JSON。"
-                + "只根据本次 channels_json 使用现有频道 ID。"
+                + "现有频道 ID 只根据本次 channels_json；但 parent_ref 可以使用 explicit_parent_refs_json 中管理员明确给出的 ID。"
                 + "本次重试必须至少返回一个有效操作；若用户要求新建频道，creates 必须非空，禁止同时返回两个空数组。"
             )
         result = await asyncio.wait_for(
@@ -288,6 +290,7 @@ class KookNameBeautifyPlugin(Star):
         resolved_guild_id = self._resolve_guild_id(event, guild_id)
         validation_error = ""
         require_creates = instruction_requires_creation(instruction)
+        explicit_parent_refs = extract_explicit_channel_ids(instruction)
         for attempt in range(2):
             async with self._api_client(token) as client:
                 channels = await client.list_channels(resolved_guild_id)
@@ -307,10 +310,11 @@ class KookNameBeautifyPlugin(Star):
                 validation_error=validation_error,
             )
             self._debug(
-                "[KOOK Beautify] AI plan output guild=%s attempt=%s/2 require_creates=%s output=%r",
+                "[KOOK Beautify] AI plan output guild=%s attempt=%s/2 require_creates=%s explicit_parents=%s output=%r",
                 resolved_guild_id,
                 attempt + 1,
                 require_creates,
+                explicit_parent_refs,
                 ai_output[:1500],
             )
             try:
@@ -320,6 +324,7 @@ class KookNameBeautifyPlugin(Star):
                     max_name_length=self.max_name_length,
                     max_changes=self.max_changes,
                     require_creates=require_creates,
+                    allowed_parent_refs=explicit_parent_refs,
                 )
                 break
             except PlanError as exc:
