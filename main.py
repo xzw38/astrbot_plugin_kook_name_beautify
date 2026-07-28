@@ -37,7 +37,7 @@ except ImportError:  # Allow direct local imports during standalone development.
     from kook_api import KookApiClient, KookApiError
 
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
 
 
 @register(

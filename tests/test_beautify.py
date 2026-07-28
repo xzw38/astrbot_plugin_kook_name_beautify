@@ -4,6 +4,7 @@ import unittest
 from beautify import (
     Channel,
     PlanError,
+    build_channel_inventory,
     build_planner_prompt,
     parse_rename_plan,
     parse_structure_plan,
@@ -84,6 +85,17 @@ class RenamePlanTests(unittest.TestCase):
         self.assertIn('"channel_id":"voice"', prompt)
         self.assertIn('"creates"', prompt)
         self.assertIn("不要删除频道", prompt)
+
+    def test_inventory_removes_deleted_category_parent_reference(self):
+        inventory = json.loads(build_channel_inventory([
+            Channel(id="text", name="娱乐聊天", type=1, parent_id="deleted-category"),
+            Channel(id="cat", name="当前分组", type=0, is_category=True),
+            Channel(id="voice", name="当前语音", type=2, parent_id="cat"),
+        ]))
+        records = {item["channel_id"]: item for item in inventory}
+        self.assertEqual(records["text"]["parent_id"], "")
+        self.assertEqual(records["voice"]["parent_id"], "cat")
+        self.assertNotIn("deleted-category", json.dumps(inventory))
 
     def test_parse_complete_structure_plan(self):
         payload = {

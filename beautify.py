@@ -147,15 +147,20 @@ class PlanStore:
 
 
 def build_channel_inventory(channels: Iterable[Channel]) -> str:
+    channel_list = list(channels)
+    valid_category_ids = {
+        channel.id for channel in channel_list if channel.id and channel.kind == "category"
+    }
     records = [
         {
             "channel_id": channel.id,
             "current_name": channel.name,
             "kind": channel.kind,
-            "parent_id": channel.parent_id,
+            # KOOK may leave a deleted category ID on its former children.
+            "parent_id": channel.parent_id if channel.parent_id in valid_category_ids else "",
             "level": channel.level,
         }
-        for channel in channels
+        for channel in channel_list
     ]
     return json.dumps(records, ensure_ascii=False, separators=(",", ":"))
 
@@ -178,7 +183,9 @@ def build_planner_prompt(instruction: str, channels: Iterable[Channel]) -> str:
         '"name":"🎧・组队开黑","kind":"voice","parent_ref":"community",'
         '"limit_amount":25,"voice_quality":"2","reason":"理由"}]}\n'
         "renames 只能引用现有频道；creates 可创建 category、text、voice；parent_ref 可为空、"
-        "引用现有分组 ID，或引用本方案新分组的 temp_id。不要删除频道、移动现有频道或修改权限。"
+        "引用 channels_json 中 kind=category 的频道 ID，或引用本方案新分组的 temp_id。"
+        "不得把普通频道 ID 或未出现在 channels_json 中的旧 ID 用作 parent_ref。"
+        "不要删除频道、移动现有频道或修改权限。"
     )
 
 

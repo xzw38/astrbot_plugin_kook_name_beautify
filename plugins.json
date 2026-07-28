@@ -3,7 +3,7 @@
     "display_name": "KOOK AI 频道美化",
     "desc": "使用自然语言设计 KOOK 分组、文字频道和语音频道，管理员确认后可一键创建完整结构、改名现有频道并安全撤销。",
     "short_desc": "用自然语言一键设计并创建 KOOK 频道结构。",
-    "version": "0.2.1",
+    "version": "0.2.2",
     "author": "xzw38",
     "repo": "https://github.com/xzw38/astrbot_plugin_kook_name_beautify",
     "tags": [
