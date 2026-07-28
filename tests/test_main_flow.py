@@ -37,7 +37,7 @@ if "astrbot" not in sys.modules:
         "astrbot.api.star": star,
     })
 
-from beautify import Channel, CreateChange, RenameChange
+from beautify import Channel, CreateChange, DeleteChange, RenameChange
 from kook_api import KookApiError
 from main import KookNameBeautifyPlugin
 
@@ -101,9 +101,14 @@ class FakeClient:
         self.channels.pop(channel_id)
 
 
+class NonAdminEvent(FakeEvent):
+    def is_admin(self):
+        return False
+
+
 class MainFlowTests(unittest.IsolatedAsyncioTestCase):
     def make_plugin(self, client):
-        plugin = KookNameBeautifyPlugin(object(), {"bot_token": "token"})
+        plugin = KookNameBeautifyPlugin(object(), {"bot_token": "token", "guild_id": "guild"})
         plugin._api_client = lambda token: client
         return plugin
 
@@ -165,6 +170,40 @@ class MainFlowTests(unittest.IsolatedAsyncioTestCase):
             await plugin._rollback_plan(FakeEvent(), plan.id)
         self.assertIn(category_id, client.channels)
         self.assertEqual(client.channels["old"].name, "新名称")
+
+    async def test_non_admin_cannot_plan_permanent_delete(self):
+        client = FakeClient([Channel("old", "待删除频道", 1)])
+        plugin = self.make_plugin(client)
+        with self.assertRaisesRegex(Exception, "只有 AstrBot 管理员"):
+            await plugin._create_deletion_plan(
+                NonAdminEvent(), channel_name="待删除频道"
+            )
+        self.assertIn("old", client.channels)
+
+    async def test_permanent_delete_by_exact_name(self):
+        client = FakeClient([Channel("old", "待删除频道", 1)])
+        plugin = self.make_plugin(client)
+        plan = await plugin._create_deletion_plan(
+            FakeEvent(), channel_name="待删除频道"
+        )
+        self.assertEqual(plan.deletes[0], DeleteChange("old", "待删除频道", "text", "管理员明确要求永久删除"))
+
+        with self.assertRaisesRegex(Exception, "不能用普通确认"):
+            await plugin._apply_plan(FakeEvent(), plan.id)
+        result = await plugin._delete_plan(FakeEvent(), plan.id)
+        self.assertIn("永久删除", result)
+        self.assertNotIn("old", client.channels)
+        with self.assertRaisesRegex(Exception, "无法撤销"):
+            await plugin._rollback_plan(FakeEvent(), plan.id)
+
+    async def test_nonempty_category_cannot_be_deleted(self):
+        client = FakeClient([
+            Channel("cat", "管理分组", 0, is_category=True),
+            Channel("child", "管理频道", 1, parent_id="cat"),
+        ])
+        plugin = self.make_plugin(client)
+        with self.assertRaisesRegex(Exception, "不能删除非空分组"):
+            await plugin._create_deletion_plan(FakeEvent(), channel_id="cat")
 
     async def test_planning_refreshes_and_retries_stale_channel_id(self):
         client = FakeClient([Channel("old", "旧名称", 1)])

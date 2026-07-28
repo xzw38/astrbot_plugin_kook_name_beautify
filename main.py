@@ -14,6 +14,7 @@ try:
         PLANNER_SYSTEM_PROMPT,
         Channel,
         CreatedChannel,
+        DeleteChange,
         PlanError,
         PlanStore,
         RenamePlan,
@@ -29,6 +30,7 @@ except ImportError:  # Allow direct local imports during standalone development.
         PLANNER_SYSTEM_PROMPT,
         Channel,
         CreatedChannel,
+        DeleteChange,
         PlanError,
         PlanStore,
         RenamePlan,
@@ -41,7 +43,7 @@ except ImportError:  # Allow direct local imports during standalone development.
     from kook_api import KookApiClient, KookApiError
 
 
-__version__ = "0.2.4"
+__version__ = "0.3.0"
 
 
 @register(
@@ -345,12 +347,115 @@ class KookNameBeautifyPlugin(Star):
             creates=creates,
         )
 
+    async def _create_deletion_plan(
+        self,
+        event: AstrMessageEvent,
+        channel_id: str = "",
+        channel_name: str = "",
+    ) -> RenamePlan:
+        self._check_kook_event(event)
+        self._check_allowlist(event)
+        channel_id = str(channel_id or "").strip()
+        channel_name = str(channel_name or "").strip()
+        if not channel_id and not channel_name:
+            raise PlanError("请提供要永久删除的频道 ID 或完整频道名称。")
+        token = self._resolve_token(event)
+        guild_id = self._resolve_guild_id(event)
+        async with self._api_client(token) as client:
+            channels = await client.list_channels(guild_id)
+        matches = [
+            channel
+            for channel in channels
+            if (channel_id and channel.id == channel_id)
+            or (not channel_id and channel.name == channel_name)
+        ]
+        if not matches:
+            target = channel_id or channel_name
+            raise PlanError(f"当前服务器找不到频道：{target}。请使用完整名称或最新频道 ID。")
+        if len(matches) > 1:
+            raise PlanError("存在多个同名频道，请改用频道 ID 指定删除目标。")
+        target = matches[0]
+        if channel_id and channel_name and target.name != channel_name:
+            raise PlanError(
+                f"频道 ID {channel_id} 当前名称是“{target.name}”，与指定名称不一致。"
+            )
+        if target.kind == "category":
+            children = [channel.name for channel in channels if channel.parent_id == target.id]
+            if children:
+                raise PlanError(
+                    "不能删除非空分组“"
+                    + target.name
+                    + "”，请先单独处理其中频道："
+                    + "、".join(children[:8])
+                )
+        return self.plans.create(
+            guild_id=guild_id,
+            user_id=self._sender_id(event),
+            instruction=f"永久删除频道 {target.name}",
+            changes=[],
+            creates=[],
+            deletes=[DeleteChange(target.id, target.name, target.kind, "管理员明确要求永久删除")],
+        )
+
+    async def _delete_plan(self, event: AstrMessageEvent, plan_id: str) -> str:
+        self._check_kook_event(event)
+        self._check_allowlist(event)
+        plan = self.plans.get(plan_id, user_id=self._sender_id(event))
+        if plan.applied:
+            raise PlanError("这个永久删除方案已经执行过了。")
+        if len(plan.deletes) != 1 or plan.changes or plan.creates:
+            raise PlanError("该方案不是独立的单频道删除方案，已拒绝执行。")
+        target = plan.deletes[0]
+        token = self._resolve_token(event)
+        async with self._mutation_lock:
+            async with self._api_client(token) as client:
+                channels = await client.list_channels(plan.guild_id)
+                current = {channel.id: channel for channel in channels}.get(target.channel_id)
+                if current is None:
+                    raise PlanError("目标频道已经不存在，未重复删除。")
+                if current.name != target.old_name or current.kind != target.kind:
+                    raise PlanError(
+                        f"目标频道已发生变化，未删除：预览为“{target.old_name}”，"
+                        f"当前为“{current.name}”。"
+                    )
+                if current.kind == "category":
+                    children = [
+                        channel.name for channel in channels if channel.parent_id == current.id
+                    ]
+                    if children:
+                        raise PlanError(
+                            "删除前发现分组中已有频道，未执行永久删除："
+                            + "、".join(children[:8])
+                        )
+                self._debug(
+                    "[KOOK Beautify] permanent delete start plan=%s channel=%s kind=%s name=%r",
+                    plan.id,
+                    target.channel_id,
+                    target.kind,
+                    target.old_name,
+                )
+                await client.delete_channel(target.channel_id)
+        plan.applied = True
+        logger.info(
+            "[KOOK Beautify] permanently deleted guild=%s plan=%s channel=%s name=%r",
+            plan.guild_id,
+            plan.id,
+            target.channel_id,
+            target.old_name,
+        )
+        return (
+            f"频道“{target.old_name}”已永久删除。"
+            "此操作无法通过 /kook美化撤销 恢复频道内容、消息或权限。"
+        )
+
     async def _apply_plan(self, event: AstrMessageEvent, plan_id: str) -> str:
         self._check_kook_event(event)
         self._check_allowlist(event)
         plan = self.plans.get(plan_id, user_id=self._sender_id(event))
         if plan.applied:
             raise PlanError("这个方案已经执行过了。")
+        if plan.deletes:
+            raise PlanError(f"永久删除方案不能用普通确认执行，请发送：/kook删除确认 {plan.id}")
         token = self._resolve_token(event)
         self._debug(
             "[KOOK Beautify] apply start plan=%s guild=%s creates=%s renames=%s user=%s",
@@ -529,6 +634,8 @@ class KookNameBeautifyPlugin(Star):
         )
         if not plan.applied:
             raise PlanError("这个方案尚未执行，不需要撤销。")
+        if plan.deletes:
+            raise PlanError("永久删除的频道内容、消息和权限无法撤销恢复。")
         if plan.rolled_back:
             raise PlanError("这个方案已经撤销过了。")
         token = self._resolve_token(event)
@@ -674,6 +781,7 @@ class KookNameBeautifyPlugin(Star):
         """为当前 KOOK 服务器生成完整频道结构与名称美化预览。
 
         当管理员要求设计、创建、整理、美化、统一或重命名 KOOK 分组、文字频道、语音频道时调用。
+        若管理员要求永久删除频道，不要用本工具，应调用 kook_plan_channel_deletion。
         instruction 必须完整保留管理员指定的主题、风格、语言和例外要求。
         本工具只生成预览，不会直接修改频道。返回结果中会提供确认命令，必须让管理员自行发送该命令。
         用户明确回复“确认执行方案 <编号>”或发送确认命令后，应调用 kook_apply_beautify_plan。
@@ -735,6 +843,73 @@ class KookNameBeautifyPlugin(Star):
         except Exception as exc:
             logger.exception("KOOK beautify apply tool failed")
             return f"执行美化方案失败：{exc.__class__.__name__}"
+
+    @filter.llm_tool(name="kook_plan_channel_deletion")
+    async def kook_plan_channel_deletion(
+        self,
+        event: AstrMessageEvent,
+        channel_id: str = "",
+        channel_name: str = "",
+    ) -> str:
+        """为管理员明确指定的一个 KOOK 频道生成永久删除预览。
+
+        用户明确要求删除、移除某一个频道或空分组时调用。优先传 channel_id；只有用户仅提供名称时
+        才传完整 channel_name。本工具只生成预览，不直接删除。频道删除会永久丢失消息和权限，
+        必须让管理员随后明确回复“确认永久删除方案 <编号>”。
+        Args:
+            channel_id(string): 要删除的 KOOK 频道 ID；未知时传空字符串。
+            channel_name(string): 要删除的完整频道名称；已提供 ID 时可传空字符串。
+        """
+        try:
+            plan = await self._create_deletion_plan(event, channel_id, channel_name)
+            return format_plan_preview(plan)
+        except (PlanError, KookApiError) as exc:
+            logger.warning("[KOOK Beautify Tool] delete planning failed: %s", exc)
+            return f"KOOK 频道永久删除预览生成失败：{exc}"
+        except Exception as exc:
+            logger.exception("KOOK delete planning tool failed")
+            return f"KOOK 频道永久删除预览生成失败：{exc.__class__.__name__}"
+
+    @filter.llm_tool(name="kook_apply_channel_deletion_plan")
+    async def kook_apply_channel_deletion_plan(
+        self,
+        event: AstrMessageEvent,
+        plan_id: str,
+        confirm: bool = False,
+    ) -> str:
+        """执行管理员在当前消息中明确确认的单频道永久删除方案。
+
+        只有当前消息包含同一方案编号及“确认永久删除方案”、/kook删除确认 或
+        /kook_delete_confirm 时才能调用，并且 confirm 必须为 true。不能根据历史消息代替确认。
+        Args:
+            plan_id(string): 永久删除预览中的八位方案编号。
+            confirm(boolean): 管理员当前消息明确确认永久删除时传 true，否则传 false。
+        """
+        plan_id = str(plan_id or "").strip().lower()
+        if not bool(confirm):
+            return "未删除：confirm 必须为 true，请先让管理员明确确认永久删除。"
+        if not self._has_explicit_plan_action(
+            event,
+            plan_id,
+            (
+                "/kook删除确认",
+                "/kook_delete_confirm",
+                "确认永久删除方案",
+                "确认永久删除",
+            ),
+        ):
+            return (
+                "未删除：当前消息没有明确确认永久删除这个方案。"
+                f"请让管理员回复“确认永久删除方案 {plan_id}”。"
+            )
+        try:
+            return await self._delete_plan(event, plan_id)
+        except (PlanError, KookApiError) as exc:
+            logger.error("[KOOK Beautify Tool] permanent delete rejected plan=%s error=%s", plan_id, exc)
+            return f"永久删除频道失败：{exc}"
+        except Exception as exc:
+            logger.exception("KOOK permanent delete tool failed")
+            return f"永久删除频道失败：{exc.__class__.__name__}"
 
     @filter.llm_tool(name="kook_rollback_beautify_plan")
     async def kook_rollback_beautify_plan(
@@ -825,6 +1000,34 @@ class KookNameBeautifyPlugin(Star):
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.platform_adapter_type(filter.PlatformAdapterType.KOOK)
+    @filter.command("kook删除确认")
+    async def delete_confirm_command(self, event: AstrMessageEvent):
+        plan_id = str(event.message_str or "").removeprefix("/kook删除确认").strip().lower()
+        try:
+            yield event.plain_result(await self._delete_plan(event, plan_id))
+        except (PlanError, KookApiError) as exc:
+            logger.error("[KOOK Beautify] permanent delete rejected plan=%s error=%s", plan_id, exc)
+            yield event.plain_result(f"永久删除频道失败：{exc}")
+        except Exception as exc:
+            logger.exception("KOOK permanent delete command failed")
+            yield event.plain_result(f"永久删除频道失败：{exc.__class__.__name__}")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.platform_adapter_type(filter.PlatformAdapterType.KOOK)
+    @filter.command("kook_delete_confirm")
+    async def delete_confirm_command_alias(self, event: AstrMessageEvent):
+        plan_id = str(event.message_str or "").removeprefix("/kook_delete_confirm").strip().lower()
+        try:
+            yield event.plain_result(await self._delete_plan(event, plan_id))
+        except (PlanError, KookApiError) as exc:
+            logger.error("[KOOK Beautify] permanent delete alias rejected plan=%s error=%s", plan_id, exc)
+            yield event.plain_result(f"永久删除频道失败：{exc}")
+        except Exception as exc:
+            logger.exception("KOOK permanent delete alias failed")
+            yield event.plain_result(f"永久删除频道失败：{exc.__class__.__name__}")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.platform_adapter_type(filter.PlatformAdapterType.KOOK)
     @filter.command("kook美化撤销")
     async def rollback_command(self, event: AstrMessageEvent):
         plan_id = str(event.message_str or "").removeprefix("/kook美化撤销").strip().lower()
@@ -872,6 +1075,8 @@ class KookNameBeautifyPlugin(Star):
             "/kook美化 <自然语言要求>  生成预览\n"
             "/kook美化确认 <方案编号>  一键应用结构\n"
             "/kook美化撤销 <方案编号>  删除本方案新建频道并恢复原名称\n"
+            "/kook删除确认 <方案编号>  永久删除预览中的单个频道\n"
+            "/kook_delete_confirm <方案编号>  英文永久删除确认命令\n"
             "/kook_beautify_confirm <方案编号>  英文确认命令\n"
             "/kook_beautify_rollback <方案编号>  英文撤销命令\n"
             "/kook频道列表  查看当前频道和 ID\n\n"

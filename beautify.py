@@ -64,6 +64,14 @@ class CreateChange:
 
 
 @dataclass(frozen=True, slots=True)
+class DeleteChange:
+    channel_id: str
+    old_name: str
+    kind: str
+    reason: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class CreatedChannel:
     temp_id: str
     channel_id: str
@@ -82,6 +90,7 @@ class RenamePlan:
     creates: list[CreateChange]
     created_at: float
     expires_at: float
+    deletes: list[DeleteChange] = field(default_factory=list)
     applied: bool = False
     rolled_back: bool = False
     applied_channel_ids: list[str] = field(default_factory=list)
@@ -89,7 +98,7 @@ class RenamePlan:
 
     @property
     def operation_count(self) -> int:
-        return len(self.changes) + len(self.creates)
+        return len(self.changes) + len(self.creates) + len(self.deletes)
 
 
 class PlanStore:
@@ -105,6 +114,7 @@ class PlanStore:
         instruction: str,
         changes: list[RenameChange],
         creates: list[CreateChange] | None = None,
+        deletes: list[DeleteChange] | None = None,
     ) -> RenamePlan:
         self.cleanup()
         now = time.time()
@@ -121,6 +131,7 @@ class PlanStore:
             creates=list(creates or []),
             created_at=now,
             expires_at=now + self.ttl_seconds,
+            deletes=list(deletes or []),
         )
         self._plans[plan.id] = plan
         return plan
@@ -388,6 +399,10 @@ def format_plan_preview(plan: RenamePlan) -> str:
     kind_labels = {"category": "分组", "text": "文字", "voice": "语音"}
     lines = [f"KOOK 频道结构预览（方案 {plan.id}，共 {plan.operation_count} 项）", ""]
     index = 1
+    for item in plan.deletes:
+        label = kind_labels.get(item.kind, "频道")
+        lines.append(f"{index}. [永久删除{label}] {item.old_name}  ({item.channel_id})")
+        index += 1
     for item in plan.creates:
         label = kind_labels.get(item.kind, "频道")
         parent = f"，归属 {item.parent_ref}" if item.parent_ref else ""
@@ -398,12 +413,21 @@ def format_plan_preview(plan: RenamePlan) -> str:
         label = kind_labels.get(change.kind, "频道")
         lines.append(f"{index}. [改名{label}] {change.old_name}  ->  {change.new_name}")
         index += 1
-    lines.extend([
-        "",
-        "确认一键应用：/kook美化确认 " + plan.id,
-        "也可以直接回复：确认执行方案 " + plan.id,
-        "应用后可撤销：/kook美化撤销 " + plan.id,
-        "已记录当前频道名称作为本方案撤销备份（保存在内存中）。",
-        "不会删除任何原有频道；确认前方案会过期，执行前会再次检查冲突。",
-    ])
+    if plan.deletes:
+        lines.extend([
+            "",
+            "警告：删除后频道内容、消息和权限无法由本插件恢复。",
+            "确认永久删除：/kook删除确认 " + plan.id,
+            "也可以直接回复：确认永久删除方案 " + plan.id,
+            "普通美化确认命令不能执行永久删除。",
+        ])
+    else:
+        lines.extend([
+            "",
+            "确认一键应用：/kook美化确认 " + plan.id,
+            "也可以直接回复：确认执行方案 " + plan.id,
+            "应用后可撤销：/kook美化撤销 " + plan.id,
+            "已记录当前频道名称作为本方案撤销备份（保存在内存中）。",
+            "不会删除任何原有频道；确认前方案会过期，执行前会再次检查冲突。",
+        ])
     return "\n".join(lines)
