@@ -22,6 +22,8 @@ try:
         extract_explicit_channel_ids,
         format_plan_preview,
         instruction_requires_creation,
+        instruction_requires_deletion,
+        parse_complete_plan,
         parse_structure_plan,
     )
     from .kook_api import KookApiClient, KookApiError
@@ -38,12 +40,14 @@ except ImportError:  # Allow direct local imports during standalone development.
         extract_explicit_channel_ids,
         format_plan_preview,
         instruction_requires_creation,
+        instruction_requires_deletion,
+        parse_complete_plan,
         parse_structure_plan,
     )
     from kook_api import KookApiClient, KookApiError
 
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 
 @register(
@@ -212,6 +216,47 @@ class KookNameBeautifyPlugin(Star):
                 return result
         raise KookApiError("无法从当前消息识别服务器 ID，请在插件配置中填写 guild_id。")
 
+    @staticmethod
+    def _find_channel_id(value: Any, depth: int = 0) -> str:
+        if depth > 5:
+            return ""
+        if isinstance(value, dict):
+            for key in ("channel_id", "target_id"):
+                result = value.get(key)
+                if isinstance(result, (str, int)) and str(result).strip():
+                    return str(result).strip()
+            for child in value.values():
+                result = KookNameBeautifyPlugin._find_channel_id(child, depth + 1)
+                if result:
+                    return result
+        elif isinstance(value, (list, tuple)):
+            for child in value:
+                result = KookNameBeautifyPlugin._find_channel_id(child, depth + 1)
+                if result:
+                    return result
+        return ""
+
+    def _resolve_current_channel_id(self, event: AstrMessageEvent) -> str:
+        getter = getattr(event, "get_group_id", None)
+        if callable(getter):
+            try:
+                value = str(getter() or "").strip()
+                if value:
+                    return value
+            except Exception:
+                pass
+        for source in (event, getattr(event, "message_obj", None)):
+            for attr in ("channel_id", "group_id", "target_id"):
+                value = getattr(source, attr, "")
+                if isinstance(value, (str, int)) and str(value).strip():
+                    return str(value).strip()
+        message_obj = getattr(event, "message_obj", None)
+        for attr in ("raw_message", "raw_data", "message", "extra"):
+            result = self._find_channel_id(getattr(message_obj, attr, None))
+            if result:
+                return result
+        return ""
+
     async def _provider_id(self, event: AstrMessageEvent) -> str:
         current_id_getter = getattr(self.context, "get_current_chat_provider_id", None)
         unified_origin = getattr(event, "unified_msg_origin", None)
@@ -248,12 +293,13 @@ class KookNameBeautifyPlugin(Star):
         instruction: str,
         channels: list[Channel],
         validation_error: str = "",
+        protected_channel_ids: tuple[str, ...] = (),
     ) -> str:
         provider_id = await self._provider_id(event)
         system_prompt = PLANNER_SYSTEM_PROMPT
         if self.custom_planner_prompt:
             system_prompt += "\n\n管理员补充规范：\n" + self.custom_planner_prompt
-        prompt = build_planner_prompt(instruction, channels)
+        prompt = build_planner_prompt(instruction, channels, protected_channel_ids)
         if validation_error:
             prompt += (
                 "\n\n上一次方案校验失败："
@@ -292,12 +338,19 @@ class KookNameBeautifyPlugin(Star):
         resolved_guild_id = self._resolve_guild_id(event, guild_id)
         validation_error = ""
         require_creates = instruction_requires_creation(instruction)
+        require_deletes = instruction_requires_deletion(instruction)
         explicit_parent_refs = extract_explicit_channel_ids(instruction)
+        current_channel_id = self._resolve_current_channel_id(event)
+        if require_deletes and not current_channel_id:
+            raise PlanError("无法识别当前操作频道，为避免批量替换时删掉回复通道，已拒绝生成方案。")
+        protected_channel_ids = (current_channel_id,) if require_deletes else ()
         for attempt in range(2):
             async with self._api_client(token) as client:
                 channels = await client.list_channels(resolved_guild_id)
             if not channels:
                 raise KookApiError("这个服务器没有返回可美化的频道。")
+            if require_deletes and current_channel_id not in {channel.id for channel in channels}:
+                raise PlanError("当前操作频道未出现在 KOOK 实时频道列表中，为避免误删已拒绝批量替换。")
             logger.info(
                 "[KOOK Beautify] planning guild=%s channels=%s user=%s attempt=%s/2",
                 resolved_guild_id,
@@ -310,6 +363,7 @@ class KookNameBeautifyPlugin(Star):
                 instruction,
                 channels,
                 validation_error=validation_error,
+                protected_channel_ids=protected_channel_ids,
             )
             self._debug(
                 "[KOOK Beautify] AI plan output guild=%s attempt=%s/2 require_creates=%s explicit_parents=%s output=%r",
@@ -320,13 +374,15 @@ class KookNameBeautifyPlugin(Star):
                 ai_output[:1500],
             )
             try:
-                changes, creates = parse_structure_plan(
+                changes, creates, deletes = parse_complete_plan(
                     ai_output,
                     channels,
                     max_name_length=self.max_name_length,
                     max_changes=self.max_changes,
                     require_creates=require_creates,
+                    require_deletes=require_deletes,
                     allowed_parent_refs=explicit_parent_refs,
+                    protected_channel_ids=protected_channel_ids,
                 )
                 break
             except PlanError as exc:
@@ -345,6 +401,7 @@ class KookNameBeautifyPlugin(Star):
             instruction=instruction,
             changes=changes,
             creates=creates,
+            deletes=deletes,
         )
 
     async def _create_deletion_plan(
@@ -448,6 +505,153 @@ class KookNameBeautifyPlugin(Star):
             "此操作无法通过 /kook美化撤销 恢复频道内容、消息或权限。"
         )
 
+    async def _replace_plan(self, event: AstrMessageEvent, plan_id: str) -> str:
+        self._check_kook_event(event)
+        self._check_allowlist(event)
+        plan = self.plans.get(plan_id, user_id=self._sender_id(event))
+        if plan.applied:
+            raise PlanError("这个永久替换方案已经执行过了。")
+        if not plan.deletes or not (plan.creates or plan.changes or len(plan.deletes) > 1):
+            raise PlanError("该方案不是批量永久替换方案。")
+        token = self._resolve_token(event)
+        created: list[CreatedChannel] = []
+        applied = []
+        permanently_deleted = []
+        async with self._mutation_lock:
+            async with self._api_client(token) as client:
+                current_channels = await client.list_channels(plan.guild_id)
+                current_map = {channel.id: channel for channel in current_channels}
+                delete_ids = {item.channel_id for item in plan.deletes}
+                conflicts = [
+                    change.old_name
+                    for change in plan.changes
+                    if change.channel_id not in current_map
+                    or current_map[change.channel_id].name != change.old_name
+                ]
+                conflicts.extend(
+                    item.old_name
+                    for item in plan.deletes
+                    if item.channel_id not in current_map
+                    or current_map[item.channel_id].name != item.old_name
+                    or current_map[item.channel_id].kind != item.kind
+                )
+                if conflicts:
+                    raise PlanError(
+                        "永久替换前发现频道已变化，方案未执行：" + "、".join(conflicts[:8])
+                    )
+                for item in plan.deletes:
+                    if item.kind != "category":
+                        continue
+                    outside_children = [
+                        channel.name
+                        for channel in current_channels
+                        if channel.parent_id == item.channel_id
+                        and channel.id not in delete_ids
+                    ]
+                    if outside_children:
+                        raise PlanError(
+                            f"待删除分组“{item.old_name}”仍包含必须保留的频道："
+                            + "、".join(outside_children[:8])
+                        )
+                rename_ids = {change.channel_id for change in plan.changes}
+                occupied_names = {
+                    channel.name
+                    for channel in current_channels
+                    if channel.id not in rename_ids and channel.id not in delete_ids
+                }
+                planned_names = [
+                    *(change.new_name for change in plan.changes),
+                    *(item.name for item in plan.creates),
+                ]
+                duplicate_names = [name for name in planned_names if name in occupied_names]
+                if duplicate_names:
+                    raise PlanError(
+                        "永久替换前发现新名称已被保留频道占用："
+                        + "、".join(duplicate_names[:8])
+                    )
+                temp_id_map: dict[str, str] = {}
+                try:
+                    for index, item in enumerate(plan.creates, start=1):
+                        parent_id = temp_id_map.get(item.parent_ref, item.parent_ref)
+                        self._debug(
+                            "[KOOK Beautify] replacement create plan=%s item=%s/%s temp=%s name=%r",
+                            plan.id,
+                            index,
+                            len(plan.creates),
+                            item.temp_id,
+                            item.name,
+                        )
+                        channel = await client.create_channel(
+                            plan.guild_id,
+                            item.name,
+                            item.kind,
+                            parent_id=parent_id,
+                            limit_amount=item.limit_amount,
+                            voice_quality=item.voice_quality,
+                        )
+                        temp_id_map[item.temp_id] = channel.id
+                        created.append(CreatedChannel(
+                            item.temp_id,
+                            channel.id,
+                            item.name,
+                            item.kind,
+                            parent_id,
+                        ))
+                    for change in plan.changes:
+                        await client.update_channel_name(change.channel_id, change.new_name)
+                        applied.append(change)
+                    for item in plan.deletes:
+                        self._debug(
+                            "[KOOK Beautify] replacement permanent delete plan=%s channel=%s kind=%s name=%r",
+                            plan.id,
+                            item.channel_id,
+                            item.kind,
+                            item.old_name,
+                        )
+                        await client.delete_channel(item.channel_id)
+                        permanently_deleted.append(item)
+                except Exception as exc:
+                    if permanently_deleted:
+                        plan.applied = True
+                        plan.created_channels = created
+                        plan.applied_channel_ids = [change.channel_id for change in applied]
+                        raise KookApiError(
+                            f"永久替换已进入不可逆删除阶段后失败：{exc}。"
+                            f"已永久删除 {len(permanently_deleted)} 个旧频道，"
+                            "为避免进一步破坏，未自动撤回新结构；请根据日志人工检查。"
+                        ) from exc
+                    rollback_failed = []
+                    for change in reversed(applied):
+                        try:
+                            await client.update_channel_name(change.channel_id, change.old_name)
+                        except Exception:
+                            rollback_failed.append(change.new_name)
+                    for item in reversed(created):
+                        try:
+                            await client.delete_channel(item.channel_id)
+                        except Exception:
+                            rollback_failed.append(item.name)
+                    detail = f"永久替换在删除旧频道前失败：{exc}。已尝试恢复改名并清理新建频道。"
+                    if rollback_failed:
+                        detail += " 自动恢复失败：" + "、".join(rollback_failed)
+                    raise KookApiError(detail) from exc
+        plan.applied = True
+        plan.created_channels = created
+        plan.applied_channel_ids = [change.channel_id for change in applied]
+        logger.info(
+            "[KOOK Beautify] replacement applied guild=%s plan=%s created=%s renamed=%s deleted=%s",
+            plan.guild_id,
+            plan.id,
+            len(created),
+            len(applied),
+            len(permanently_deleted),
+        )
+        return (
+            f"永久替换方案 {plan.id} 已完成：新建 {len(created)} 个，"
+            f"改名 {len(applied)} 个，永久删除 {len(permanently_deleted)} 个旧频道。"
+            "被删除频道的消息和权限无法恢复。"
+        )
+
     async def _apply_plan(self, event: AstrMessageEvent, plan_id: str) -> str:
         self._check_kook_event(event)
         self._check_allowlist(event)
@@ -455,7 +659,8 @@ class KookNameBeautifyPlugin(Star):
         if plan.applied:
             raise PlanError("这个方案已经执行过了。")
         if plan.deletes:
-            raise PlanError(f"永久删除方案不能用普通确认执行，请发送：/kook删除确认 {plan.id}")
+            command = "/kook替换确认" if (plan.creates or plan.changes or len(plan.deletes) > 1) else "/kook删除确认"
+            raise PlanError(f"永久删除方案不能用普通确认执行，请发送：{command} {plan.id}")
         token = self._resolve_token(event)
         self._debug(
             "[KOOK Beautify] apply start plan=%s guild=%s creates=%s renames=%s user=%s",
@@ -781,7 +986,7 @@ class KookNameBeautifyPlugin(Star):
         """为当前 KOOK 服务器生成完整频道结构与名称美化预览。
 
         当管理员要求设计、创建、整理、美化、统一或重命名 KOOK 分组、文字频道、语音频道时调用。
-        若管理员要求永久删除频道，不要用本工具，应调用 kook_plan_channel_deletion。
+        若管理员只删除一个频道，应调用 kook_plan_channel_deletion；若要求生成新模板并替换、批量删除旧频道，则使用本工具生成永久替换预览。
         instruction 必须完整保留管理员指定的主题、风格、语言和例外要求。
         本工具只生成预览，不会直接修改频道。返回结果中会提供确认命令，必须让管理员自行发送该命令。
         用户明确回复“确认执行方案 <编号>”或发送确认命令后，应调用 kook_apply_beautify_plan。
@@ -843,6 +1048,48 @@ class KookNameBeautifyPlugin(Star):
         except Exception as exc:
             logger.exception("KOOK beautify apply tool failed")
             return f"执行美化方案失败：{exc.__class__.__name__}"
+
+    @filter.llm_tool(name="kook_apply_replacement_plan")
+    async def kook_apply_replacement_plan(
+        self,
+        event: AstrMessageEvent,
+        plan_id: str,
+        confirm: bool = False,
+    ) -> str:
+        """执行管理员在当前消息中明确确认的 KOOK 批量永久替换方案。
+
+        只有当前消息包含同一方案编号及“确认永久替换方案”、/kook替换确认 或
+        /kook_replace_confirm 时才能调用，并且 confirm 必须为 true。该操作会先创建新模板，
+        再永久删除预览中的旧频道，删除内容不可撤销。
+        Args:
+            plan_id(string): 永久替换预览中的八位方案编号。
+            confirm(boolean): 管理员当前消息明确确认永久替换时传 true，否则传 false。
+        """
+        plan_id = str(plan_id or "").strip().lower()
+        if not bool(confirm):
+            return "未替换：confirm 必须为 true，请先让管理员明确确认永久替换。"
+        if not self._has_explicit_plan_action(
+            event,
+            plan_id,
+            (
+                "/kook替换确认",
+                "/kook_replace_confirm",
+                "确认永久替换方案",
+                "确认永久替换",
+            ),
+        ):
+            return (
+                "未替换：当前消息没有明确确认永久替换这个方案。"
+                f"请让管理员回复“确认永久替换方案 {plan_id}”。"
+            )
+        try:
+            return await self._replace_plan(event, plan_id)
+        except (PlanError, KookApiError) as exc:
+            logger.error("[KOOK Beautify Tool] replacement rejected plan=%s error=%s", plan_id, exc)
+            return f"永久替换频道结构失败：{exc}"
+        except Exception as exc:
+            logger.exception("KOOK replacement tool failed")
+            return f"永久替换频道结构失败：{exc.__class__.__name__}"
 
     @filter.llm_tool(name="kook_plan_channel_deletion")
     async def kook_plan_channel_deletion(
@@ -1000,6 +1247,34 @@ class KookNameBeautifyPlugin(Star):
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.platform_adapter_type(filter.PlatformAdapterType.KOOK)
+    @filter.command("kook替换确认")
+    async def replacement_confirm_command(self, event: AstrMessageEvent):
+        plan_id = str(event.message_str or "").removeprefix("/kook替换确认").strip().lower()
+        try:
+            yield event.plain_result(await self._replace_plan(event, plan_id))
+        except (PlanError, KookApiError) as exc:
+            logger.error("[KOOK Beautify] replacement rejected plan=%s error=%s", plan_id, exc)
+            yield event.plain_result(f"永久替换频道结构失败：{exc}")
+        except Exception as exc:
+            logger.exception("KOOK replacement command failed")
+            yield event.plain_result(f"永久替换频道结构失败：{exc.__class__.__name__}")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.platform_adapter_type(filter.PlatformAdapterType.KOOK)
+    @filter.command("kook_replace_confirm")
+    async def replacement_confirm_command_alias(self, event: AstrMessageEvent):
+        plan_id = str(event.message_str or "").removeprefix("/kook_replace_confirm").strip().lower()
+        try:
+            yield event.plain_result(await self._replace_plan(event, plan_id))
+        except (PlanError, KookApiError) as exc:
+            logger.error("[KOOK Beautify] replacement alias rejected plan=%s error=%s", plan_id, exc)
+            yield event.plain_result(f"永久替换频道结构失败：{exc}")
+        except Exception as exc:
+            logger.exception("KOOK replacement alias failed")
+            yield event.plain_result(f"永久替换频道结构失败：{exc.__class__.__name__}")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.platform_adapter_type(filter.PlatformAdapterType.KOOK)
     @filter.command("kook删除确认")
     async def delete_confirm_command(self, event: AstrMessageEvent):
         plan_id = str(event.message_str or "").removeprefix("/kook删除确认").strip().lower()
@@ -1076,6 +1351,8 @@ class KookNameBeautifyPlugin(Star):
             "/kook美化确认 <方案编号>  一键应用结构\n"
             "/kook美化撤销 <方案编号>  删除本方案新建频道并恢复原名称\n"
             "/kook删除确认 <方案编号>  永久删除预览中的单个频道\n"
+            "/kook替换确认 <方案编号>  先建新模板再永久删除旧频道\n"
+            "/kook_replace_confirm <方案编号>  英文永久替换确认命令\n"
             "/kook_delete_confirm <方案编号>  英文永久删除确认命令\n"
             "/kook_beautify_confirm <方案编号>  英文确认命令\n"
             "/kook_beautify_rollback <方案编号>  英文撤销命令\n"

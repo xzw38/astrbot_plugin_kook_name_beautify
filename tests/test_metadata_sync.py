@@ -48,6 +48,7 @@ class MetadataSyncTests(unittest.TestCase):
         self.assertIn('@filter.llm_tool(name="kook_rollback_beautify_plan")', main_text)
         self.assertIn('@filter.llm_tool(name="kook_plan_channel_deletion")', main_text)
         self.assertIn('@filter.llm_tool(name="kook_apply_channel_deletion_plan")', main_text)
+        self.assertIn('@filter.llm_tool(name="kook_apply_replacement_plan")', main_text)
         self.assertGreaterEqual(main_text.count("confirm(boolean):"), 2)
 
 

@@ -8,6 +8,8 @@ from beautify import (
     build_planner_prompt,
     extract_explicit_channel_ids,
     instruction_requires_creation,
+    instruction_requires_deletion,
+    parse_complete_plan,
     parse_rename_plan,
     parse_structure_plan,
 )
@@ -86,7 +88,7 @@ class RenamePlanTests(unittest.TestCase):
         self.assertIn("<channels_json>", prompt)
         self.assertIn('"channel_id":"voice"', prompt)
         self.assertIn('"creates"', prompt)
-        self.assertIn("不要删除频道", prompt)
+        self.assertIn('"deletes"', prompt)
 
     def test_inventory_removes_deleted_category_parent_reference(self):
         inventory = json.loads(build_channel_inventory([
@@ -137,6 +139,40 @@ class RenamePlanTests(unittest.TestCase):
         self.assertEqual(len(renames), 1)
         self.assertEqual([item.kind for item in creates], ["category", "text", "voice"])
         self.assertEqual(creates[2].limit_amount, 25)
+
+    def test_replacement_plan_protects_current_channel_and_orders_deletes(self):
+        channels = CHANNELS + [Channel("current", "机器人操作台", 1)]
+        payload = {
+            "renames": [],
+            "creates": [{"temp_id": "newcat", "name": "新分组", "kind": "category"}],
+            "deletes": [
+                {"channel_id": "cat"},
+                {"channel_id": "text"},
+                {"channel_id": "voice"},
+            ],
+        }
+        self.assertTrue(instruction_requires_creation("生成一套赛博朋克新模板"))
+        self.assertTrue(instruction_requires_deletion("套上新模板，之前频道都不要"))
+        changes, creates, deletes = parse_complete_plan(
+            json.dumps(payload, ensure_ascii=False),
+            channels,
+            require_creates=True,
+            require_deletes=True,
+            protected_channel_ids=("current",),
+        )
+        self.assertEqual(changes, [])
+        self.assertEqual(creates[0].name, "新分组")
+        self.assertEqual([item.channel_id for item in deletes], ["text", "voice", "cat"])
+
+        payload["deletes"].append({"channel_id": "current"})
+        with self.assertRaisesRegex(PlanError, "必须保留"):
+            parse_complete_plan(
+                json.dumps(payload, ensure_ascii=False),
+                channels,
+                require_creates=True,
+                require_deletes=True,
+                protected_channel_ids=("current",),
+            )
 
     def test_explicit_numeric_parent_is_allowed_for_kook_validation(self):
         instruction = "在分组 1305474374831940 下新建语音频道"
