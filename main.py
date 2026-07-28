@@ -37,7 +37,7 @@ except ImportError:  # Allow direct local imports during standalone development.
     from kook_api import KookApiClient, KookApiError
 
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 
 @register(
@@ -241,15 +241,23 @@ class KookNameBeautifyPlugin(Star):
         event: AstrMessageEvent,
         instruction: str,
         channels: list[Channel],
+        validation_error: str = "",
     ) -> str:
         provider_id = await self._provider_id(event)
         system_prompt = PLANNER_SYSTEM_PROMPT
         if self.custom_planner_prompt:
             system_prompt += "\n\n管理员补充规范：\n" + self.custom_planner_prompt
+        prompt = build_planner_prompt(instruction, channels)
+        if validation_error:
+            prompt += (
+                "\n\n上一次方案校验失败："
+                + validation_error
+                + "\n请完全丢弃上一次使用的频道 ID，只根据本次 channels_json 重新生成完整 JSON。"
+            )
         result = await asyncio.wait_for(
             self.context.llm_generate(
                 chat_provider_id=provider_id,
-                prompt=build_planner_prompt(instruction, channels),
+                prompt=prompt,
                 system_prompt=system_prompt,
                 max_tokens=4000,
                 temperature=self.llm_temperature,
@@ -274,23 +282,43 @@ class KookNameBeautifyPlugin(Star):
             raise PlanError("请描述希望使用的风格，例如“统一成简约黑白风，保留中文语义”。")
         token = self._resolve_token(event)
         resolved_guild_id = self._resolve_guild_id(event, guild_id)
-        async with self._api_client(token) as client:
-            channels = await client.list_channels(resolved_guild_id)
-        if not channels:
-            raise KookApiError("这个服务器没有返回可美化的频道。")
-        logger.info(
-            "[KOOK Beautify] planning guild=%s channels=%s user=%s",
-            resolved_guild_id,
-            len(channels),
-            self._sender_id(event),
-        )
-        ai_output = await self._generate_ai_plan(event, instruction, channels)
-        changes, creates = parse_structure_plan(
-            ai_output,
-            channels,
-            max_name_length=self.max_name_length,
-            max_changes=self.max_changes,
-        )
+        validation_error = ""
+        for attempt in range(2):
+            async with self._api_client(token) as client:
+                channels = await client.list_channels(resolved_guild_id)
+            if not channels:
+                raise KookApiError("这个服务器没有返回可美化的频道。")
+            logger.info(
+                "[KOOK Beautify] planning guild=%s channels=%s user=%s attempt=%s/2",
+                resolved_guild_id,
+                len(channels),
+                self._sender_id(event),
+                attempt + 1,
+            )
+            ai_output = await self._generate_ai_plan(
+                event,
+                instruction,
+                channels,
+                validation_error=validation_error,
+            )
+            try:
+                changes, creates = parse_structure_plan(
+                    ai_output,
+                    channels,
+                    max_name_length=self.max_name_length,
+                    max_changes=self.max_changes,
+                )
+                break
+            except PlanError as exc:
+                validation_error = str(exc)
+                logger.warning(
+                    "[KOOK Beautify] plan validation failed guild=%s attempt=%s/2 error=%s",
+                    resolved_guild_id,
+                    attempt + 1,
+                    exc,
+                )
+                if attempt == 1:
+                    raise PlanError(f"AI 刷新频道列表并重试后仍未生成有效方案：{exc}") from exc
         return self.plans.create(
             guild_id=resolved_guild_id,
             user_id=self._sender_id(event),

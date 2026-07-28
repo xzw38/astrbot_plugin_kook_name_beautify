@@ -364,6 +364,7 @@ def format_plan_preview(plan: RenamePlan) -> str:
         "确认一键应用：/kook美化确认 " + plan.id,
         "也可以直接回复：确认执行方案 " + plan.id,
         "应用后可撤销：/kook美化撤销 " + plan.id,
+        "已记录当前频道名称作为本方案撤销备份（保存在内存中）。",
         "不会删除任何原有频道；确认前方案会过期，执行前会再次检查冲突。",
     ])
     return "\n".join(lines)

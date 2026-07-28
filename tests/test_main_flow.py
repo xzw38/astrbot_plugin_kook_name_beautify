@@ -166,6 +166,26 @@ class MainFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(category_id, client.channels)
         self.assertEqual(client.channels["old"].name, "新名称")
 
+    async def test_planning_refreshes_and_retries_stale_channel_id(self):
+        client = FakeClient([Channel("old", "旧名称", 1)])
+        plugin = self.make_plugin(client)
+        outputs = iter([
+            '{"renames":[{"channel_id":"deleted", "new_name":"失效"}],"creates":[]}',
+            '{"renames":[{"channel_id":"old", "new_name":"新名称"}],"creates":[]}',
+        ])
+        validation_errors = []
+
+        async def generate(event, instruction, channels, validation_error=""):
+            validation_errors.append(validation_error)
+            return next(outputs)
+
+        plugin._generate_ai_plan = generate
+        plan = await plugin._create_plan(FakeEvent(), "全部重新美化", "guild")
+
+        self.assertEqual(plan.changes[0].channel_id, "old")
+        self.assertEqual(validation_errors[0], "")
+        self.assertIn("不存在的频道 ID", validation_errors[1])
+
 
 if __name__ == "__main__":
     unittest.main()
