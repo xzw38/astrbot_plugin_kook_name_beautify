@@ -25,7 +25,8 @@
     "default": 600
   },
   "max_changes": {
-    "description": "单个方案最大改名数量",
+    "description": "单个方案最大操作数量",
+    "hint": "新建频道与现有频道改名的总数上限。",
     "type": "int",
     "default": 100
   },
@@ -63,7 +64,7 @@
     "default": 20
   },
   "request_interval_ms": {
-    "description": "批量改名请求间隔（毫秒）",
+    "description": "批量操作请求间隔（毫秒）",
     "type": "int",
     "hint": "用于降低触发 KOOK API 限流的概率。",
     "default": 350
@@ -76,7 +77,7 @@
   "debug_logging": {
     "description": "输出 KOOK 频道美化调试日志",
     "type": "bool",
-    "hint": "记录请求路径、状态码、KOOK 错误码、频道改名进度和回滚结果，不会记录 Bot Token 或 Authorization。",
+    "hint": "记录请求路径、状态码、KOOK 错误码、频道创建/改名进度和回滚结果，不会记录 Bot Token 或 Authorization。",
     "default": true
   }
 }

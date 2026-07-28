@@ -1,4 +1,4 @@
-"""AstrBot plugin for AI-assisted KOOK channel name beautification."""
+"""AstrBot plugin for AI-assisted KOOK channel structure beautification."""
 
 from __future__ import annotations
 
@@ -13,35 +13,37 @@ try:
     from .beautify import (
         PLANNER_SYSTEM_PROMPT,
         Channel,
+        CreatedChannel,
         PlanError,
         PlanStore,
         RenamePlan,
         build_planner_prompt,
         format_plan_preview,
-        parse_rename_plan,
+        parse_structure_plan,
     )
     from .kook_api import KookApiClient, KookApiError
 except ImportError:  # Allow direct local imports during standalone development.
     from beautify import (
         PLANNER_SYSTEM_PROMPT,
         Channel,
+        CreatedChannel,
         PlanError,
         PlanStore,
         RenamePlan,
         build_planner_prompt,
         format_plan_preview,
-        parse_rename_plan,
+        parse_structure_plan,
     )
     from kook_api import KookApiClient, KookApiError
 
 
-__version__ = "0.1.3"
+__version__ = "0.2.0"
 
 
 @register(
     "astrbot_plugin_kook_name_beautify",
     "xzw38",
-    "用自然语言预览并安全执行 KOOK 频道名称美化",
+    "用自然语言预览并一键应用 KOOK 频道结构美化",
     __version__,
 )
 class KookNameBeautifyPlugin(Star):
@@ -283,7 +285,7 @@ class KookNameBeautifyPlugin(Star):
             self._sender_id(event),
         )
         ai_output = await self._generate_ai_plan(event, instruction, channels)
-        changes = parse_rename_plan(
+        changes, creates = parse_structure_plan(
             ai_output,
             channels,
             max_name_length=self.max_name_length,
@@ -294,6 +296,7 @@ class KookNameBeautifyPlugin(Star):
             user_id=self._sender_id(event),
             instruction=instruction,
             changes=changes,
+            creates=creates,
         )
 
     async def _apply_plan(self, event: AstrMessageEvent, plan_id: str) -> str:
@@ -304,9 +307,10 @@ class KookNameBeautifyPlugin(Star):
             raise PlanError("这个方案已经执行过了。")
         token = self._resolve_token(event)
         self._debug(
-            "[KOOK Beautify] apply start plan=%s guild=%s changes=%s user=%s",
+            "[KOOK Beautify] apply start plan=%s guild=%s creates=%s renames=%s user=%s",
             plan.id,
             plan.guild_id,
+            len(plan.creates),
             len(plan.changes),
             self._sender_id(event),
         )
@@ -328,8 +332,61 @@ class KookNameBeautifyPlugin(Star):
                     raise PlanError(
                         "执行前检查发现频道已被修改，方案未执行：" + "、".join(conflicts[:8])
                     )
+                rename_ids = {change.channel_id for change in plan.changes}
+                occupied_names = {
+                    channel.name for channel in current_channels if channel.id not in rename_ids
+                }
+                duplicate_names = [
+                    name
+                    for name in [
+                        *(change.new_name for change in plan.changes),
+                        *(item.name for item in plan.creates),
+                    ]
+                    if name in occupied_names
+                ]
+                if duplicate_names:
+                    raise PlanError(
+                        "执行前发现新名称已被其他频道占用：" + "、".join(duplicate_names[:8])
+                    )
+
                 applied = []
+                created: list[CreatedChannel] = []
+                temp_id_map: dict[str, str] = {}
                 try:
+                    for index, item in enumerate(plan.creates, start=1):
+                        parent_id = temp_id_map.get(item.parent_ref, item.parent_ref)
+                        self._debug(
+                            "[KOOK Beautify] create start plan=%s item=%s/%s temp=%s kind=%s parent=%s name=%r",
+                            plan.id,
+                            index,
+                            len(plan.creates),
+                            item.temp_id,
+                            item.kind,
+                            parent_id or "root",
+                            item.name,
+                        )
+                        channel = await client.create_channel(
+                            plan.guild_id,
+                            item.name,
+                            item.kind,
+                            parent_id=parent_id,
+                            limit_amount=item.limit_amount,
+                            voice_quality=item.voice_quality,
+                        )
+                        temp_id_map[item.temp_id] = channel.id
+                        created.append(CreatedChannel(
+                            temp_id=item.temp_id,
+                            channel_id=channel.id,
+                            name=item.name,
+                            kind=item.kind,
+                            parent_id=parent_id,
+                        ))
+                        self._debug(
+                            "[KOOK Beautify] create success plan=%s temp=%s channel=%s",
+                            plan.id,
+                            item.temp_id,
+                            channel.id,
+                        )
                     for index, change in enumerate(plan.changes, start=1):
                         self._debug(
                             "[KOOK Beautify] update start plan=%s item=%s/%s channel=%s old=%r new=%r",
@@ -350,14 +407,13 @@ class KookNameBeautifyPlugin(Star):
                             change.channel_id,
                         )
                 except Exception as exc:
-                    failed_index = len(applied) + 1
-                    failed_channel = plan.changes[failed_index - 1].channel_id if failed_index <= len(plan.changes) else "unknown"
                     logger.error(
-                        "[KOOK Beautify] update failed plan=%s item=%s/%s channel=%s error=%s",
+                        "[KOOK Beautify] apply failed plan=%s created=%s/%s renamed=%s/%s error=%s",
                         plan.id,
-                        failed_index,
+                        len(created),
+                        len(plan.creates),
+                        len(applied),
                         len(plan.changes),
-                        failed_channel,
                         exc,
                     )
                     rollback_failed = []
@@ -382,17 +438,40 @@ class KookNameBeautifyPlugin(Star):
                                 plan.id,
                                 change.channel_id,
                             )
-                    detail = (
-                        f"执行到第 {failed_index} 项时失败：{exc}。"
-                        "已尝试恢复之前的名称。"
-                    )
+                    for item in reversed(created):
+                        try:
+                            self._debug(
+                                "[KOOK Beautify] auto-delete start plan=%s channel=%s name=%r",
+                                plan.id,
+                                item.channel_id,
+                                item.name,
+                            )
+                            await client.delete_channel(item.channel_id)
+                        except Exception:
+                            rollback_failed.append(item.name)
+                            logger.exception(
+                                "[KOOK Beautify] auto-delete failed plan=%s channel=%s",
+                                plan.id,
+                                item.channel_id,
+                            )
+                    detail = f"应用频道结构时失败：{exc}。已尝试恢复改名并清理本次新建频道。"
                     if rollback_failed:
-                        detail += " 以下频道自动恢复失败：" + "、".join(rollback_failed)
+                        detail += " 以下项目自动恢复失败：" + "、".join(rollback_failed)
                     raise KookApiError(detail) from exc
         plan.applied = True
         plan.applied_channel_ids = [change.channel_id for change in plan.changes]
-        logger.info("[KOOK Beautify] applied guild=%s plan=%s changes=%s", plan.guild_id, plan.id, len(plan.changes))
-        return f"方案 {plan.id} 已执行，共更新 {len(plan.changes)} 个频道名称。\n需要恢复时发送：/kook美化撤销 {plan.id}"
+        plan.created_channels = created
+        logger.info(
+            "[KOOK Beautify] applied guild=%s plan=%s created=%s renamed=%s",
+            plan.guild_id,
+            plan.id,
+            len(created),
+            len(plan.changes),
+        )
+        return (
+            f"方案 {plan.id} 已一键应用：新建 {len(created)} 个频道，改名 {len(plan.changes)} 个频道。"
+            f"\n需要恢复时发送：/kook美化撤销 {plan.id}"
+        )
 
     async def _rollback_plan(self, event: AstrMessageEvent, plan_id: str) -> str:
         self._check_kook_event(event)
@@ -408,15 +487,17 @@ class KookNameBeautifyPlugin(Star):
             raise PlanError("这个方案已经撤销过了。")
         token = self._resolve_token(event)
         self._debug(
-            "[KOOK Beautify] rollback start plan=%s guild=%s changes=%s user=%s",
+            "[KOOK Beautify] rollback start plan=%s guild=%s created=%s renames=%s user=%s",
             plan.id,
             plan.guild_id,
+            len(plan.created_channels),
             len(plan.changes),
             self._sender_id(event),
         )
         async with self._mutation_lock:
             async with self._api_client(token) as client:
                 current_channels = await client.list_channels(plan.guild_id)
+                current_map = {channel.id: channel for channel in current_channels}
                 current_names = {channel.id: channel.name for channel in current_channels}
                 conflicts = [
                     change.new_name
@@ -432,8 +513,47 @@ class KookNameBeautifyPlugin(Star):
                     raise PlanError(
                         "撤销前检查发现频道名称又被修改，未自动覆盖：" + "、".join(conflicts[:8])
                     )
+                created_ids = {item.channel_id for item in plan.created_channels}
+                created_conflicts = [
+                    item.name
+                    for item in plan.created_channels
+                    if item.channel_id not in current_map
+                    or current_map[item.channel_id].name != item.name
+                ]
+                if created_conflicts:
+                    raise PlanError(
+                        "撤销前发现本方案创建的频道已被删除或改名，未继续操作："
+                        + "、".join(created_conflicts[:8])
+                    )
+                unsafe_categories = []
+                for item in plan.created_channels:
+                    if item.kind != "category":
+                        continue
+                    outside_children = [
+                        channel.name
+                        for channel in current_channels
+                        if channel.parent_id == item.channel_id and channel.id not in created_ids
+                    ]
+                    if outside_children:
+                        unsafe_categories.append(f"{item.name}（含：{'、'.join(outside_children[:4])}）")
+                if unsafe_categories:
+                    raise PlanError(
+                        "为避免删除后来人工添加的频道，以下新建分组不会自动撤销："
+                        + "；".join(unsafe_categories)
+                    )
                 restored_changes = []
+                deleted_channels = []
                 try:
+                    for item in reversed(plan.created_channels):
+                        self._debug(
+                            "[KOOK Beautify] rollback delete start plan=%s channel=%s kind=%s name=%r",
+                            plan.id,
+                            item.channel_id,
+                            item.kind,
+                            item.name,
+                        )
+                        await client.delete_channel(item.channel_id)
+                        deleted_channels.append(item)
                     for index, change in enumerate(reversed(plan.changes), start=1):
                         self._debug(
                             "[KOOK Beautify] rollback update start plan=%s item=%s/%s channel=%s current=%r restore=%r",
@@ -453,8 +573,10 @@ class KookNameBeautifyPlugin(Star):
                         )
                 except Exception as exc:
                     logger.error(
-                        "[KOOK Beautify] rollback update failed plan=%s restored=%s/%s error=%s",
+                        "[KOOK Beautify] rollback failed plan=%s deleted=%s/%s restored=%s/%s error=%s",
                         plan.id,
+                        len(deleted_channels),
+                        len(plan.created_channels),
                         len(restored_changes),
                         len(plan.changes),
                         exc,
@@ -465,14 +587,24 @@ class KookNameBeautifyPlugin(Star):
                             await client.update_channel_name(change.channel_id, change.new_name)
                         except Exception:
                             compensation_failed.append(change.old_name)
-                    detail = f"撤销过程中发生错误：{exc}。已尝试恢复到撤销前状态。"
+                    detail = f"撤销过程中发生错误：{exc}。已尝试恢复已改回的名称。"
+                    if deleted_channels:
+                        detail += " 已删除的本方案频道无法自动重建：" + "、".join(
+                            item.name for item in deleted_channels
+                        ) + "。"
                     if compensation_failed:
                         detail += " 以下频道恢复失败：" + "、".join(compensation_failed)
                     raise KookApiError(detail) from exc
         plan.rolled_back = True
         restored = len(restored_changes)
-        logger.info("[KOOK Beautify] rolled back guild=%s plan=%s changes=%s", plan.guild_id, plan.id, restored)
-        return f"方案 {plan.id} 已撤销，共恢复 {restored} 个频道名称。"
+        logger.info(
+            "[KOOK Beautify] rolled back guild=%s plan=%s deleted=%s restored=%s",
+            plan.guild_id,
+            plan.id,
+            len(deleted_channels),
+            restored,
+        )
+        return f"方案 {plan.id} 已撤销：删除 {len(deleted_channels)} 个本方案频道，恢复 {restored} 个原频道名称。"
 
     async def _channel_list(self, event: AstrMessageEvent) -> str:
         self._check_kook_event(event)
@@ -493,9 +625,9 @@ class KookNameBeautifyPlugin(Star):
         event: AstrMessageEvent,
         instruction: str,
     ) -> str:
-        """为当前 KOOK 服务器生成频道名称美化预览。
+        """为当前 KOOK 服务器生成完整频道结构与名称美化预览。
 
-        当管理员用自然语言要求整理、美化、统一或重命名 KOOK 的分组、文字频道、语音频道时调用。
+        当管理员要求设计、创建、整理、美化、统一或重命名 KOOK 分组、文字频道、语音频道时调用。
         instruction 必须完整保留管理员指定的主题、风格、语言和例外要求。
         本工具只生成预览，不会直接修改频道。返回结果中会提供确认命令，必须让管理员自行发送该命令。
         用户明确回复“确认执行方案 <编号>”或发送确认命令后，应调用 kook_apply_beautify_plan。
@@ -525,7 +657,7 @@ class KookNameBeautifyPlugin(Star):
 
         只有当前用户消息明确包含同一个方案编号，并且说“确认执行方案”、发送 /kook美化确认
         或 /kook_beautify_confirm 时才能调用。必须把 confirm 设为 true。不能根据之前的对话、默认同意
-        或模型自己的判断代替用户确认。此工具会实际修改 KOOK 频道名称。
+        或模型自己的判断代替用户确认。此工具会实际创建 KOOK 频道并修改现有频道名称。
 
         Args:
             plan_id(string): 美化预览中显示的八位方案编号。
@@ -692,10 +824,10 @@ class KookNameBeautifyPlugin(Star):
         yield event.plain_result(
             "KOOK 频道美化命令\n"
             "/kook美化 <自然语言要求>  生成预览\n"
-            "/kook美化确认 <方案编号>  执行改名\n"
-            "/kook美化撤销 <方案编号>  恢复原名称\n"
+            "/kook美化确认 <方案编号>  一键应用结构\n"
+            "/kook美化撤销 <方案编号>  删除本方案新建频道并恢复原名称\n"
             "/kook_beautify_confirm <方案编号>  英文确认命令\n"
             "/kook_beautify_rollback <方案编号>  英文撤销命令\n"
             "/kook频道列表  查看当前频道和 ID\n\n"
-            "也可以直接对 AI 说“把这个服务器的频道统一成简约科技风”，生成预览后回复“确认执行方案 编号”。"
+            "也可以直接对 AI 说“设计一套二次元社团频道并一键应用”，生成预览后回复“确认执行方案 编号”。"
         )

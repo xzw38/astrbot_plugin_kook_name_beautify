@@ -38,6 +38,16 @@ class FakeKookApiClient(KookApiClient):
         self.calls.append((method, path, params, json_body))
         if path == "channel/update":
             return {}
+        if path == "channel/create":
+            return {
+                "id": "created-id",
+                "name": json_body["name"],
+                "type": json_body.get("type", 0),
+                "is_category": bool(json_body.get("is_category")),
+                "parent_id": json_body.get("parent_id", ""),
+            }
+        if path == "channel/delete":
+            return {}
         channel_type = params["type"]
         page = params["page"]
         if channel_type == 1 and page == 1:
@@ -94,6 +104,38 @@ class KookApiClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             client.calls,
             [("POST", "channel/update", None, {"channel_id": "123", "name": "💬・聊天"})],
+        )
+
+    async def test_create_category_text_and_voice_use_official_payloads(self):
+        client = FakeKookApiClient()
+        category = await client.create_channel("guild", "COMMUNITY", "category")
+        text_channel = await client.create_channel(
+            "guild", "闲聊", "text", parent_id=category.id
+        )
+        await client.create_channel(
+            "guild",
+            "语音",
+            "voice",
+            parent_id=category.id,
+            limit_amount=25,
+            voice_quality="3",
+        )
+        self.assertEqual(category.id, "created-id")
+        self.assertEqual(text_channel.parent_id, "created-id")
+        self.assertEqual(client.calls[0][3], {
+            "guild_id": "guild", "name": "COMMUNITY", "is_category": 1
+        })
+        self.assertEqual(client.calls[1][3]["type"], 1)
+        self.assertEqual(client.calls[2][3]["type"], 2)
+        self.assertEqual(client.calls[2][3]["limit_amount"], 25)
+        self.assertEqual(client.calls[2][3]["voice_quality"], "3")
+
+    async def test_delete_channel_uses_official_endpoint(self):
+        client = FakeKookApiClient()
+        await client.delete_channel("123")
+        self.assertEqual(
+            client.calls,
+            [("POST", "channel/delete", None, {"channel_id": "123"})],
         )
 
 

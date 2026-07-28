@@ -189,3 +189,50 @@ class KookApiClient:
             "channel/update",
             json_body={"channel_id": str(channel_id), "name": str(name)},
         )
+
+    async def create_channel(
+        self,
+        guild_id: str,
+        name: str,
+        kind: str,
+        *,
+        parent_id: str = "",
+        limit_amount: int = 0,
+        voice_quality: str = "2",
+    ) -> Channel:
+        body: dict[str, Any] = {
+            "guild_id": str(guild_id),
+            "name": str(name),
+        }
+        if kind == "category":
+            body["is_category"] = 1
+        elif kind in {"text", "voice"}:
+            body["type"] = 1 if kind == "text" else 2
+            if parent_id:
+                body["parent_id"] = str(parent_id)
+            if kind == "voice":
+                body["limit_amount"] = max(0, min(int(limit_amount), 99))
+                body["voice_quality"] = str(voice_quality)
+        else:
+            raise KookApiError(f"不支持创建的频道类型：{kind}")
+        data = await self._request("POST", "channel/create", json_body=body)
+        if not isinstance(data, dict):
+            raise KookApiError("KOOK 创建频道返回格式不正确。")
+        channel = Channel.from_api(data)
+        if not channel.id:
+            raise KookApiError("KOOK 创建频道成功但未返回频道 ID。")
+        return Channel(
+            id=channel.id,
+            name=channel.name or str(name),
+            type=0 if kind == "category" else (2 if kind == "voice" else 1),
+            level=channel.level,
+            parent_id=channel.parent_id or str(parent_id),
+            is_category=kind == "category",
+        )
+
+    async def delete_channel(self, channel_id: str) -> None:
+        await self._request(
+            "POST",
+            "channel/delete",
+            json_body={"channel_id": str(channel_id)},
+        )

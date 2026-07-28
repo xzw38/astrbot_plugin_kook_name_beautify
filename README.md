@@ -1,8 +1,8 @@
 # astrbot_plugin_kook_name_beautify
 
-AstrBot 的 KOOK AI 频道名称美化插件。管理员可以直接用自然语言描述想要的风格，插件读取当前服务器的分组、文字频道和语音频道，调用 AstrBot 当前 LLM 生成统一改名方案。
+AstrBot 的 KOOK AI 频道结构美化插件。管理员可以直接用自然语言描述服务器布局和风格，插件读取当前分组、文字频道和语音频道，调用 AstrBot 当前 LLM 生成可一键应用的完整结构方案。
 
-插件不会让 AI 直接批量修改频道。每次先返回完整预览，只有管理员再次发送带方案编号的确认命令后才会调用 KOOK API；执行后还可以撤销。
+插件不会让 AI 未经确认直接修改频道。每次先返回完整预览，只有管理员再次发送带方案编号的确认命令后，才会批量创建分组、文字频道、语音频道并改名现有频道；执行后还可以撤销。
 
 ## 安装
 
@@ -41,17 +41,20 @@ pip install -r data/plugins/astrbot_plugin_kook_name_beautify/requirements.txt
 把这个服务器的频道统一成简约高级黑白风，分类用英文大标题，普通频道保留中文语义
 把频道整理成二次元社团风，Emoji 要统一，不要改“管理后台”
 给所有游戏频道用电竞风，语音频道用同一套分隔符
+帮我设计一套完整的二次元社团结构，要有公告、闲聊、作品分享和三个语音房，一键应用
 ```
 
 AI 会调用 `kook_beautify_channels` 工具，返回类似：
 
 ```text
-KOOK 频道美化预览（方案 a1b2c3d4，共 4 项）
+KOOK 频道结构预览（方案 a1b2c3d4，共 6 项）
 
-1. [分组] 社区交流  ->  『 COMMUNITY 』
-2. [文字] 闲聊大厅  ->  💬・闲聊大厅
-3. [文字] 截图分享  ->  📷・截图分享
-4. [语音] 组队开黑  ->  🎧・组队开黑
+1. [新建分组] 『 COMMUNITY 』
+2. [新建文字] 📢・社区公告，归属 community
+3. [新建文字] 💬・闲聊大厅，归属 community
+4. [新建语音] 🎧・组队开黑，归属 community，人数 25，音质 2
+5. [改名文字] 截图分享  ->  📷・作品分享
+6. [改名语音] 大厅  ->  🎙・语音大厅
 
 确认执行：/kook美化确认 a1b2c3d4
 ```
@@ -80,19 +83,20 @@ KOOK 频道美化预览（方案 a1b2c3d4，共 4 项）
 
 ## 安全行为
 
-- AI 只能引用 KOOK API 实际返回的频道 ID。
-- 空名称、控制字符、超长名称、重复频道、重名和超量变更会在执行前拒绝。
+- 改名只能引用 KOOK API 实际返回的频道 ID；新建子频道只能归属现有分组或同方案新建分组。
+- 空名称、控制字符、超长名称、重复临时编号、错误频道类型、非法语音参数、重名和超量操作会在执行前拒绝。
 - 确认时会重新读取频道；原名称有变化就取消整批执行，避免覆盖他人的新修改。
-- 批量改名串行执行，并遵守 KOOK 的 `429` 与 `X-Rate-Limit-Reset`。
-- 中途失败会尽量把本次已修改的频道恢复为原名称。
-- 撤销前也会检查当前名称，发现后续人工修改时不会强制覆盖。
+- 执行时先创建分组，再创建文字/语音频道，最后改名现有频道，并遵守 KOOK 限流规则。
+- 中途失败会恢复本次改名，并按反序删除本次已创建的频道。
+- 撤销只删除本方案创建的频道，不删除任何原有频道；同时恢复原频道名称。
+- 若本方案创建的频道已被人工改名/删除，或新建分组中混入了后来人工创建的子频道，撤销会拒绝执行，避免误删。
 - Token 不会写入日志或方案。
 
 待确认方案默认 10 分钟过期。方案和撤销记录保存在内存中，AstrBot 重启后需要重新生成方案。
 
 ## 当前范围
 
-当前版本只修改现有频道和分组的名称，不创建、删除、移动频道，也不修改权限、密码或慢速模式。这是刻意限制：频道结构和权限变更的影响更大，后续应使用独立的结构方案和二次确认流程实现。
+当前版本支持创建分组、文字频道和语音频道，以及改名现有频道。不会删除原有频道、移动现有频道，也不修改权限、密码或慢速模式。方案与真实创建 ID 保存在内存中，因此 AstrBot 重启后无法撤销之前执行的方案。
 
 ## 调试改名失败
 
@@ -100,15 +104,15 @@ KOOK 频道美化预览（方案 a1b2c3d4，共 4 项）
 
 ```text
 [KOOK Beautify] apply start ...
-[KOOK Beautify] update start ...
-[KOOK API] request method=POST path=/channel/update ...
-[KOOK API] response path=/channel/update http=...
-[KOOK API] payload path=/channel/update code=... message=...
+[KOOK Beautify] create start ...
+[KOOK API] request method=POST path=/channel/create ...
+[KOOK API] response path=/channel/create http=...
+[KOOK API] payload path=/channel/create code=... message=...
 ```
 
-日志不会输出 Bot Token 或 Authorization。排查时重点查看第一条 `update failed` 及它前面的 `http`、`code`、`message`：
+日志不会输出 Bot Token 或 Authorization。排查时重点查看第一条 `apply failed` 及它前面的 `http`、`code`、`message`：
 
-- 能读取但更新返回权限错误：检查机器人在目标服务器的角色是否具有管理频道权限。
+- 能读取但创建或更新返回权限错误：检查机器人在目标服务器的角色是否具有管理频道权限。
 - 返回 `429`：插件会按 `X-Rate-Limit-Reset` 自动等待并重试。
 - 返回频道不存在或执行冲突：重新生成方案，避免使用频道已变化的旧方案。
 - 无法识别服务器：在插件配置中填写 `guild_id`。
@@ -116,7 +120,7 @@ KOOK 频道美化预览（方案 a1b2c3d4，共 4 项）
 ## KOOK API 依据
 
 - [HTTP 接口规范与 Bot 鉴权](https://developer.kookapp.cn/doc/reference)
-- [频道列表与编辑频道](https://developer.kookapp.cn/doc/http/channel)
+- [频道列表、创建、编辑与删除频道](https://developer.kookapp.cn/doc/http/channel)
 - [Rate Limit](https://developer.kookapp.cn/doc/rate-limit)
 
 ## 开发与市场文件同步
