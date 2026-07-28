@@ -6,6 +6,7 @@ from beautify import (
     PlanError,
     build_channel_inventory,
     build_planner_prompt,
+    instruction_requires_creation,
     parse_rename_plan,
     parse_structure_plan,
 )
@@ -96,6 +97,17 @@ class RenamePlanTests(unittest.TestCase):
         self.assertEqual(records["text"]["parent_id"], "")
         self.assertEqual(records["voice"]["parent_id"], "cat")
         self.assertNotIn("deleted-category", json.dumps(inventory))
+
+    def test_explicit_creation_instruction_requires_nonempty_creates(self):
+        self.assertTrue(instruction_requires_creation("帮我新建几个游戏频道"))
+        self.assertTrue(instruction_requires_creation("从零设计服务器"))
+        self.assertFalse(instruction_requires_creation("只改名，不要新建频道"))
+        with self.assertRaisesRegex(PlanError, "creates 为空"):
+            parse_structure_plan(
+                '{"renames":[],"creates":[]}',
+                CHANNELS,
+                require_creates=True,
+            )
 
     def test_parse_complete_structure_plan(self):
         payload = {

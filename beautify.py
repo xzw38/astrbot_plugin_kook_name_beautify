@@ -204,6 +204,17 @@ PLANNER_SYSTEM_PROMPT = """你是 KOOK 社区频道结构与视觉规范设计�
 必须只输出严格 JSON 对象，且同时包含 renames 和 creates 数组，不得输出代码围栏或说明文字。"""
 
 
+def instruction_requires_creation(instruction: str) -> bool:
+    """Return whether the user explicitly requested new channels."""
+    normalized = re.sub(r"\s+", "", str(instruction or "")).lower()
+    if any(marker in normalized for marker in ("不要新建", "不要创建", "无需新建", "不需要创建", "只改名")):
+        return False
+    return any(marker in normalized for marker in (
+        "新建", "创建", "新增", "添加频道", "增加频道",
+        "完整频道结构", "从零设计", "设计一套频道",
+    ))
+
+
 def _extract_json(text: str) -> Any:
     candidate = str(text or "").strip()
     if not candidate:
@@ -241,6 +252,7 @@ def parse_structure_plan(
     *,
     max_name_length: int = 50,
     max_changes: int = 100,
+    require_creates: bool = False,
 ) -> tuple[list[RenameChange], list[CreateChange]]:
     payload = _extract_json(text)
     if isinstance(payload, list):
@@ -332,6 +344,8 @@ def parse_structure_plan(
             raise PlanError(f"新建名称“{item.name}”会与其他频道重名。")
         resulting_names.add(item.name)
 
+    if require_creates and not created:
+        raise PlanError("用户明确要求新建频道，但 AI 返回的 creates 为空。")
     if not changes and not created:
         raise PlanError("方案没有产生任何频道结构或名称变化。")
     created.sort(key=lambda item: 0 if item.kind == "category" else 1)
