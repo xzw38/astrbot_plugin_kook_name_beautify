@@ -55,7 +55,7 @@ class PackageImportTests(unittest.TestCase):
             package.__path__ = [{str(ROOT)!r}]
             sys.modules[package.__name__] = package
             module = importlib.import_module("astrbot_plugin_kook_name_beautify.main")
-            assert module.__version__ == "0.5.1"
+            assert module.__version__ == "0.5.2"
             fake_event = types.SimpleNamespace(message_str="lumi/kook美化确认 f5c251f1")
             assert module.KookNameBeautifyPlugin._has_explicit_plan_action(
                 fake_event,

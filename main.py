@@ -51,7 +51,7 @@ except ImportError:  # Allow direct local imports during standalone development.
     from kook_api import KookApiClient, KookApiError
 
 
-__version__ = "0.5.1"
+__version__ = "0.5.2"
 
 
 @register(
@@ -156,6 +156,16 @@ class KookNameBeautifyPlugin(Star):
             current_map = {channel.id: channel for channel in current}
             remaining = [item for item in targets if item.channel_id in current_map]
             if not remaining:
+                self._debug(
+                    "[KOOK Beautify] replacement delete verification success guild=%s deleted=%s categories=%s",
+                    guild_id,
+                    len(targets),
+                    [
+                        f"{item.old_name}({item.channel_id})"
+                        for item in targets
+                        if item.kind == "category"
+                    ],
+                )
                 return list(targets), []
             remaining_ids = {item.channel_id for item in remaining}
             self._debug(
@@ -173,6 +183,17 @@ class KookNameBeautifyPlugin(Star):
                         and channel.id in remaining_ids
                     ]
                     if remaining_children:
+                        self._debug(
+                            "[KOOK Beautify] category delete waiting guild=%s category=%s name=%r children=%s attempt=%s/4",
+                            guild_id,
+                            item.channel_id,
+                            item.old_name,
+                            [
+                                f"{channel.name}({channel.id})"
+                                for channel in remaining_children
+                            ],
+                            attempt,
+                        )
                         continue
                     outside_children = [
                         channel.name
@@ -185,10 +206,34 @@ class KookNameBeautifyPlugin(Star):
                             "分组中出现了未纳入替换方案的频道："
                             + "、".join(outside_children[:8])
                         )
+                        logger.warning(
+                            "[KOOK Beautify] category delete blocked guild=%s category=%s name=%r outside_children=%s attempt=%s/4",
+                            guild_id,
+                            item.channel_id,
+                            item.old_name,
+                            outside_children[:8],
+                            attempt,
+                        )
                         continue
                 try:
+                    self._debug(
+                        "[KOOK Beautify] replacement delete request guild=%s channel=%s kind=%s name=%r attempt=%s/4",
+                        guild_id,
+                        item.channel_id,
+                        item.kind,
+                        item.old_name,
+                        attempt,
+                    )
                     await client.delete_channel(item.channel_id)
                     last_errors.pop(item.channel_id, None)
+                    self._debug(
+                        "[KOOK Beautify] replacement delete response guild=%s channel=%s kind=%s name=%r attempt=%s/4 status=accepted_pending_verification",
+                        guild_id,
+                        item.channel_id,
+                        item.kind,
+                        item.old_name,
+                        attempt,
+                    )
                 except Exception as exc:
                     last_errors[item.channel_id] = str(exc)
                     logger.warning(
@@ -483,6 +528,17 @@ class KookNameBeautifyPlugin(Star):
                 self._sender_id(event),
                 attempt + 1,
             )
+            self._debug(
+                "[KOOK Beautify] live structure guild=%s categories=%s text=%s voice=%s",
+                resolved_guild_id,
+                [
+                    f"{channel.name}({channel.id})"
+                    for channel in channels
+                    if channel.kind == "category"
+                ],
+                sum(channel.kind == "text" for channel in channels),
+                sum(channel.kind == "voice" for channel in channels),
+            )
             ai_output = await self._generate_ai_plan(
                 event,
                 instruction,
@@ -510,6 +566,25 @@ class KookNameBeautifyPlugin(Star):
                     require_full_replacement=require_full_replacement,
                     allowed_parent_refs=explicit_parent_refs,
                     protected_channel_ids=protected_channel_ids,
+                )
+                self._debug(
+                    "[KOOK Beautify] validated plan guild=%s category_renames=%s category_creates=%s category_deletes=%s",
+                    resolved_guild_id,
+                    [
+                        f"{item.old_name}({item.channel_id})->{item.new_name}"
+                        for item in changes
+                        if item.kind == "category"
+                    ],
+                    [
+                        f"{item.name}({item.temp_id})"
+                        for item in creates
+                        if item.kind == "category"
+                    ],
+                    [
+                        f"{item.old_name}({item.channel_id})"
+                        for item in deletes
+                        if item.kind == "category"
+                    ],
                 )
                 break
             except PlanError as exc:
@@ -769,6 +844,14 @@ class KookNameBeautifyPlugin(Star):
                                     + "、".join(misplaced)
                                 )
                     for change in plan.changes:
+                        self._debug(
+                            "[KOOK Beautify] replacement rename request plan=%s channel=%s kind=%s old=%r new=%r",
+                            plan.id,
+                            change.channel_id,
+                            change.kind,
+                            change.old_name,
+                            change.new_name,
+                        )
                         await client.update_channel_name(change.channel_id, change.new_name)
                         applied.append(change)
                     deleted, remaining = await self._delete_and_verify_replacement_targets(
@@ -926,11 +1009,12 @@ class KookNameBeautifyPlugin(Star):
                     )
                     for index, change in enumerate(plan.changes, start=1):
                         self._debug(
-                            "[KOOK Beautify] update start plan=%s item=%s/%s channel=%s old=%r new=%r",
+                            "[KOOK Beautify] update start plan=%s item=%s/%s channel=%s kind=%s old=%r new=%r",
                             plan.id,
                             index,
                             len(plan.changes),
                             change.channel_id,
+                            change.kind,
                             change.old_name,
                             change.new_name,
                         )
@@ -1166,7 +1250,8 @@ class KookNameBeautifyPlugin(Star):
     ) -> str:
         """为当前 KOOK 服务器生成完整频道结构与名称美化预览。
 
-        当管理员要求设计、创建、整理、美化、统一或重命名 KOOK 分组、文字频道、语音频道时调用。
+        当管理员要求设计、创建、整理、美化、统一、添加 Emoji，或重命名 KOOK 分组、文字频道、语音频道时调用。
+        现有分组可以直接通过 renames 修改名称和 Emoji，不需要删除后重建。
         若管理员只删除一个频道，应调用 kook_plan_channel_deletion；若要求生成新模板并替换、批量删除旧频道，则使用本工具生成永久替换预览。
         instruction 必须完整保留管理员指定的主题、风格、语言和例外要求。
         本工具只生成预览，不会直接修改频道。返回结果中会提供确认命令，必须让管理员自行发送该命令。

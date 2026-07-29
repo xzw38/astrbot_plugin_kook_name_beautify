@@ -91,6 +91,7 @@ class RenamePlanTests(unittest.TestCase):
         self.assertIn('"channel_id":"voice"', prompt)
         self.assertIn('"creates"', prompt)
         self.assertIn('"deletes"', prompt)
+        self.assertIn("现有分组也可以直接改名、添加或调整 Emoji", prompt)
 
     def test_inventory_removes_deleted_category_parent_reference(self):
         inventory = json.loads(build_channel_inventory([

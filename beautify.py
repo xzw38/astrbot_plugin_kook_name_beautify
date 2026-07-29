@@ -213,7 +213,9 @@ def build_planner_prompt(
         '"name":"🎧・组队开黑","kind":"voice","parent_ref":"community",'
         '"limit_amount":25,"voice_quality":"2","reason":"理由"}],'
         '"deletes":[{"channel_id":"要永久删除的现有频道ID","reason":"理由"}]}\n'
-        "renames 只能引用现有频道；creates 可创建 category、text、voice；分组的 parent_ref 为空；"
+        "renames 只能引用现有频道，kind=category 的现有分组也可以直接改名、添加或调整 Emoji；"
+        "用户只要求美化名称或添加 Emoji 时，应使用 renames，不要创建重复频道。"
+        "creates 可创建 category、text、voice；分组的 parent_ref 为空；"
         "如果 creates 中包含新分组，每个新建文字或语音频道都必须填写 parent_ref，"
         "引用 channels_json 中 kind=category 的频道 ID、本方案新分组的 temp_id，"
         "或 explicit_parent_refs_json 中管理员明确给出的 ID。"
@@ -231,8 +233,8 @@ PLANNER_SYSTEM_PROMPT = """你是 KOOK 社区频道结构与视觉规范设计�
 
 设计原则：
 1. 若用户要求设计很多频道或完整服务器，应主动在 creates 中给出合理的分组和频道，而不是只改现有名称。
-2. 保留现有频道语义，不擅自改变用途；不需要改名的现有频道不要放进 renames。
-3. 同一服务器使用统一的 Emoji、分隔符、大小写和编号风格，名称简洁且不得重名。
+2. 保留现有频道语义，不擅自改变用途；不需要改名的现有频道不要放进 renames。现有分组、文字频道和语音频道都可以通过 renames 直接改名。
+3. 同一服务器使用统一的 Emoji、分隔符、大小写和编号风格，名称简洁且不得重名；管理员要求加 Emoji 或名称美化时，要同时处理符合范围的分组名称。
 4. 分组使用 kind=category；文字频道 kind=text；语音频道 kind=voice。
 5. 新频道使用唯一 temp_id；子频道 parent_ref 指向新分组 temp_id、现有分组 channel_id，或管理员原话明确给出的数字父分组 ID。如果方案创建了分组，所有新建文字和语音频道都必须填写 parent_ref，禁止留在服务器根目录。显式 ID 交给 KOOK API 验证，不得因此返回空方案或 error。
 6. 语音人数 limit_amount 为 0 到 99，voice_quality 只能是字符串 1、2、3。
