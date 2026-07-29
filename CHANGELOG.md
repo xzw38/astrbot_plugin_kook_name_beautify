@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.4 - 2026-07-30
+
+- 修复显式请求 `channel/list?type=1` 时部分 KOOK 服务器不返回分组 ID。
+- 分组与文字频道改用 KOOK SDK 同样的无 `type` 列表请求，再单独合并语音频道。
+- 保留 `guild/view` 和 `parent_id + channel/view` 两层分组恢复作为兜底。
+- `/kook频道列表` 增加分组/文字/语音统计，并显示每个子频道的父分组 ID。
+
 ## 0.5.3 - 2026-07-29
 
 - 修复部分 KOOK 服务器的 `channel/list?type=1/2` 不返回分组，导致旧分组从未进入删除计划。

@@ -69,12 +69,18 @@ class FakeKookApiClient(KookApiClient):
                 "is_category": True,
                 "level": 1,
             }
-        channel_type = params["type"]
+        channel_type = params.get("type")
         page = params["page"]
-        if channel_type == 1 and page == 1:
+        if channel_type is None and page == 1:
             return {
                 "items": [
-                    {"id": "cat", "name": "社区", "type": 0, "is_category": True, "level": 1},
+                    {
+                        "id": "unfiltered-cat",
+                        "name": "仅无类型请求返回的分组",
+                        "type": 0,
+                        "is_category": True,
+                        "level": 1,
+                    },
                     {
                         "id": "text1",
                         "name": "聊天",
@@ -85,14 +91,13 @@ class FakeKookApiClient(KookApiClient):
                 ],
                 "meta": {"page_total": 2},
             }
-        if channel_type == 1 and page == 2:
+        if channel_type is None and page == 2:
             return {
                 "items": [{"id": "text2", "name": "分享", "type": 1, "level": 3}],
                 "meta": {"page_total": 2},
             }
         return {
             "items": [
-                {"id": "cat", "name": "社区", "type": 0, "is_category": True, "level": 1},
                 {"id": "voice", "name": "语音", "type": 2, "level": 4},
             ],
             "meta": {"page_total": 1},
@@ -127,7 +132,7 @@ class KookApiClientTests(unittest.IsolatedAsyncioTestCase):
             {
                 "guild-only-cat",
                 "parent-only-cat",
-                "cat",
+                "unfiltered-cat",
                 "text1",
                 "text2",
                 "voice",
@@ -137,6 +142,7 @@ class KookApiClientTests(unittest.IsolatedAsyncioTestCase):
             client.calls[0],
             ("GET", "guild/view", {"guild_id": "guild"}, None),
         )
+        self.assertNotIn("type", client.calls[1][2])
         self.assertEqual(client.calls[-1][1], "channel/view")
         self.assertEqual(client.calls[-1][2]["target_id"], "parent-only-cat")
         self.assertEqual(len(client.calls), 5)

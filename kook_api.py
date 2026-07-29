@@ -173,18 +173,22 @@ class KookApiClient:
             len(guild_channels),
             sum(channel.kind == "category" for channel in channels.values()),
         )
-        for channel_type in (1, 2):
+        # KOOK categories are returned by the unfiltered/default channel list on
+        # some guilds, but disappear when type=1 is supplied explicitly.
+        for channel_type in (None, 2):
             page = 1
             while True:
+                params: dict[str, Any] = {
+                    "guild_id": guild_id,
+                    "page": page,
+                    "page_size": 50,
+                }
+                if channel_type is not None:
+                    params["type"] = channel_type
                 data = await self._request(
                     "GET",
                     "channel/list",
-                    params={
-                        "guild_id": guild_id,
-                        "type": channel_type,
-                        "page": page,
-                        "page_size": 50,
-                    },
+                    params=params,
                 )
                 if not isinstance(data, dict):
                     raise KookApiError("KOOK 频道列表返回格式不正确。")

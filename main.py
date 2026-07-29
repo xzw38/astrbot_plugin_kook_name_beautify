@@ -51,7 +51,7 @@ except ImportError:  # Allow direct local imports during standalone development.
     from kook_api import KookApiClient, KookApiError
 
 
-__version__ = "0.5.3"
+__version__ = "0.5.4"
 
 
 @register(
@@ -1237,9 +1237,19 @@ class KookNameBeautifyPlugin(Star):
         async with self._api_client(token) as client:
             channels = await client.list_channels(guild_id)
         labels = {"category": "分组", "text": "文字", "voice": "语音"}
-        lines = [f"KOOK 频道列表（{len(channels)} 项）"]
+        counts = {
+            kind: sum(channel.kind == kind for channel in channels)
+            for kind in ("category", "text", "voice")
+        }
+        lines = [
+            f"KOOK 频道列表（{len(channels)} 项：分组 {counts['category']}，"
+            f"文字 {counts['text']}，语音 {counts['voice']}）"
+        ]
         for channel in channels:
-            lines.append(f"[{labels[channel.kind]}] {channel.name}  ({channel.id})")
+            parent = f"，父分组 {channel.parent_id}" if channel.parent_id else ""
+            lines.append(
+                f"[{labels[channel.kind]}] {channel.name}  ({channel.id}{parent})"
+            )
         return "\n".join(lines)
 
     @filter.llm_tool(name="kook_beautify_channels")
