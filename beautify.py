@@ -482,6 +482,20 @@ def parse_complete_plan(
         raise PlanError("AI 方案中的 deletes 必须是数组。")
     channel_map = {channel.id: channel for channel in channels if channel.id}
     protected_ids = {str(item).strip() for item in protected_channel_ids if str(item).strip()}
+    if require_full_replacement:
+        supplied_ids = {
+            str(entry.get("channel_id", "")).strip()
+            for entry in entries
+            if isinstance(entry, dict)
+        }
+        entries = list(entries) + [
+            {
+                "channel_id": channel.id,
+                "reason": "完整替换自动纳入全部旧频道和分组",
+            }
+            for channel in channel_map.values()
+            if channel.id not in protected_ids and channel.id not in supplied_ids
+        ]
     deletes: list[DeleteChange] = []
     seen: set[str] = set()
     for index, entry in enumerate(entries, start=1):
@@ -506,14 +520,6 @@ def parse_complete_plan(
         raise PlanError("管理员没有明确要求永久删除，方案不得包含 deletes。")
     if require_deletes and not deletes:
         raise PlanError("管理员明确要求替换或删除旧频道，但 AI 返回的 deletes 为空。")
-    if require_full_replacement:
-        missing_delete_ids = set(channel_map) - protected_ids - seen
-        if missing_delete_ids:
-            missing = [channel_map[channel_id].name for channel_id in missing_delete_ids]
-            raise PlanError(
-                "全部替换方案遗漏了必须删除的旧频道或分组："
-                + "、".join(missing[:8])
-            )
     changes, creates = parse_structure_plan(
         text,
         channels,

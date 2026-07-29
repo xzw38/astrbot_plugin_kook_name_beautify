@@ -48,13 +48,40 @@ class FakeKookApiClient(KookApiClient):
             }
         if path == "channel/delete":
             return {}
+        if path == "guild/view":
+            return {
+                "id": "guild",
+                "channels": [
+                    {
+                        "id": "guild-only-cat",
+                        "name": "仅服务器详情返回的旧分组",
+                        "type": 0,
+                        "is_category": True,
+                        "level": 0,
+                    }
+                ],
+            }
+        if path == "channel/view":
+            return {
+                "id": params["target_id"],
+                "name": "通过父级 ID 补回的分组",
+                "type": 0,
+                "is_category": True,
+                "level": 1,
+            }
         channel_type = params["type"]
         page = params["page"]
         if channel_type == 1 and page == 1:
             return {
                 "items": [
                     {"id": "cat", "name": "社区", "type": 0, "is_category": True, "level": 1},
-                    {"id": "text1", "name": "聊天", "type": 1, "level": 2},
+                    {
+                        "id": "text1",
+                        "name": "聊天",
+                        "type": 1,
+                        "level": 2,
+                        "parent_id": "parent-only-cat",
+                    },
                 ],
                 "meta": {"page_total": 2},
             }
@@ -95,8 +122,24 @@ class KookApiClientTests(unittest.IsolatedAsyncioTestCase):
     async def test_list_channels_paginates_both_types_and_deduplicates_categories(self):
         client = FakeKookApiClient()
         channels = await client.list_channels("guild")
-        self.assertEqual({channel.id for channel in channels}, {"cat", "text1", "text2", "voice"})
-        self.assertEqual(len(client.calls), 3)
+        self.assertEqual(
+            {channel.id for channel in channels},
+            {
+                "guild-only-cat",
+                "parent-only-cat",
+                "cat",
+                "text1",
+                "text2",
+                "voice",
+            },
+        )
+        self.assertEqual(
+            client.calls[0],
+            ("GET", "guild/view", {"guild_id": "guild"}, None),
+        )
+        self.assertEqual(client.calls[-1][1], "channel/view")
+        self.assertEqual(client.calls[-1][2]["target_id"], "parent-only-cat")
+        self.assertEqual(len(client.calls), 5)
 
     async def test_update_channel_uses_official_endpoint_and_json_body(self):
         client = FakeKookApiClient()

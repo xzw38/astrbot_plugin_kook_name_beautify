@@ -194,18 +194,6 @@ class RenamePlanTests(unittest.TestCase):
             ],
             "deletes": [{"channel_id": "text"}, {"channel_id": "voice"}],
         }
-        with self.assertRaisesRegex(PlanError, "遗漏了必须删除"):
-            parse_complete_plan(
-                json.dumps(incomplete, ensure_ascii=False),
-                channels,
-                require_creates=True,
-                require_deletes=True,
-                require_grouped_template=True,
-                require_full_replacement=True,
-                protected_channel_ids=("current",),
-            )
-
-        incomplete["deletes"].append({"channel_id": "cat"})
         _, creates, deletes = parse_complete_plan(
             json.dumps(incomplete, ensure_ascii=False),
             channels,
@@ -217,6 +205,21 @@ class RenamePlanTests(unittest.TestCase):
         )
         self.assertEqual([item.kind for item in creates], ["category", "text"])
         self.assertEqual([item.kind for item in deletes], ["text", "voice", "category"])
+
+        incomplete["deletes"] = []
+        _, _, automatic_deletes = parse_complete_plan(
+            json.dumps(incomplete, ensure_ascii=False),
+            channels,
+            require_creates=True,
+            require_deletes=True,
+            require_grouped_template=True,
+            require_full_replacement=True,
+            protected_channel_ids=("current",),
+        )
+        self.assertEqual(
+            {item.channel_id for item in automatic_deletes},
+            {"cat", "text", "voice"},
+        )
 
     def test_template_requires_category_without_explicit_group_wording(self):
         with self.assertRaisesRegex(PlanError, "没有创建任何分组"):

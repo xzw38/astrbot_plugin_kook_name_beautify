@@ -152,6 +152,27 @@ class KookApiClient:
         if not guild_id:
             raise KookApiError("缺少 KOOK 服务器 ID。")
         channels: dict[str, Channel] = {}
+        guild_data = await self._request(
+            "GET",
+            "guild/view",
+            params={"guild_id": guild_id},
+        )
+        if not isinstance(guild_data, dict):
+            raise KookApiError("KOOK 服务器详情返回格式不正确。")
+        guild_channels = guild_data.get("channels", [])
+        if not isinstance(guild_channels, list):
+            raise KookApiError("KOOK 服务器详情缺少 channels。")
+        for item in guild_channels:
+            if not isinstance(item, dict):
+                continue
+            channel = Channel.from_api(item)
+            if channel.id:
+                channels[channel.id] = channel
+        self._debug(
+            "guild/view channels=%s categories=%s",
+            len(guild_channels),
+            sum(channel.kind == "category" for channel in channels.values()),
+        )
         for channel_type in (1, 2):
             page = 1
             while True:
@@ -181,6 +202,43 @@ class KookApiClient:
                 if page >= page_total:
                     break
                 page += 1
+        missing_parent_ids = {
+            channel.parent_id
+            for channel in channels.values()
+            if channel.parent_id and channel.parent_id not in channels
+        }
+        for parent_id in sorted(missing_parent_ids):
+            try:
+                data = await self._request(
+                    "GET",
+                    "channel/view",
+                    params={"target_id": parent_id, "need_children": False},
+                )
+            except KookApiError as exc:
+                self._debug(
+                    "unable to resolve parent category id=%s error=%s",
+                    parent_id,
+                    exc,
+                )
+                continue
+            if not isinstance(data, dict):
+                continue
+            category = Channel.from_api(data)
+            if category.id and category.kind == "category":
+                channels[category.id] = category
+                self._debug(
+                    "resolved missing parent category id=%s name=%r",
+                    category.id,
+                    category.name,
+                )
+        self._debug(
+            "merged channel inventory guild=%s total=%s categories=%s text=%s voice=%s",
+            guild_id,
+            len(channels),
+            sum(channel.kind == "category" for channel in channels.values()),
+            sum(channel.kind == "text" for channel in channels.values()),
+            sum(channel.kind == "voice" for channel in channels.values()),
+        )
         return sorted(channels.values(), key=lambda channel: (channel.level, channel.kind, channel.id))
 
     async def update_channel_name(self, channel_id: str, name: str) -> None:
