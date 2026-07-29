@@ -23,6 +23,8 @@ try:
         format_plan_preview,
         instruction_requires_creation,
         instruction_requires_deletion,
+        instruction_requires_full_replacement,
+        instruction_requires_grouped_template,
         parse_complete_plan,
         parse_structure_plan,
     )
@@ -41,13 +43,15 @@ except ImportError:  # Allow direct local imports during standalone development.
         format_plan_preview,
         instruction_requires_creation,
         instruction_requires_deletion,
+        instruction_requires_full_replacement,
+        instruction_requires_grouped_template,
         parse_complete_plan,
         parse_structure_plan,
     )
     from kook_api import KookApiClient, KookApiError
 
 
-__version__ = "0.4.1"
+__version__ = "0.5.0"
 
 
 @register(
@@ -378,6 +382,10 @@ class KookNameBeautifyPlugin(Star):
         resolved_guild_id = self._resolve_guild_id(event, guild_id)
         validation_error = ""
         require_creates = instruction_requires_creation(instruction)
+        require_full_replacement = instruction_requires_full_replacement(instruction)
+        require_grouped_template = instruction_requires_grouped_template(instruction)
+        if require_full_replacement:
+            require_creates = True
         require_deletes = instruction_requires_deletion(instruction)
         explicit_parent_refs = extract_explicit_channel_ids(instruction)
         current_channel_id = self._resolve_current_channel_id(event)
@@ -421,6 +429,8 @@ class KookNameBeautifyPlugin(Star):
                     max_changes=self.max_changes,
                     require_creates=require_creates,
                     require_deletes=require_deletes,
+                    require_grouped_template=require_grouped_template,
+                    require_full_replacement=require_full_replacement,
                     allowed_parent_refs=explicit_parent_refs,
                     protected_channel_ids=protected_channel_ids,
                 )
@@ -442,6 +452,7 @@ class KookNameBeautifyPlugin(Star):
             changes=changes,
             creates=creates,
             deletes=deletes,
+            protected_channel_ids=protected_channel_ids,
         )
 
     async def _create_deletion_plan(
@@ -557,6 +568,9 @@ class KookNameBeautifyPlugin(Star):
         created: list[CreatedChannel] = []
         applied = []
         permanently_deleted = []
+        moved_channels: list[tuple[str, str, str]] = []
+        full_replacement = instruction_requires_full_replacement(plan.instruction)
+        protected_ids = set(plan.protected_channel_ids)
         async with self._mutation_lock:
             async with self._api_client(token) as client:
                 current_channels = await client.list_channels(plan.guild_id)
@@ -587,6 +601,7 @@ class KookNameBeautifyPlugin(Star):
                         for channel in current_channels
                         if channel.parent_id == item.channel_id
                         and channel.id not in delete_ids
+                        and not (full_replacement and channel.id in protected_ids)
                     ]
                     if outside_children:
                         raise PlanError(
@@ -640,6 +655,42 @@ class KookNameBeautifyPlugin(Star):
                     await self._verify_created_channel_parents(
                         client, plan.guild_id, created
                     )
+                    if full_replacement:
+                        new_category = next(
+                            (item for item in created if item.kind == "category"),
+                            None,
+                        )
+                        if new_category is None:
+                            raise PlanError("全部替换方案没有可接收当前操作频道的新分组。")
+                        for channel in current_channels:
+                            if channel.id not in protected_ids:
+                                continue
+                            self._debug(
+                                "[KOOK Beautify] replacement move protected channel=%s old_parent=%s new_parent=%s",
+                                channel.id,
+                                channel.parent_id or "root",
+                                new_category.channel_id,
+                            )
+                            moved_channels.append(
+                                (channel.id, channel.parent_id, new_category.channel_id)
+                            )
+                            await client.update_channel_parent(
+                                channel.id, new_category.channel_id
+                            )
+                        if moved_channels:
+                            refreshed = await client.list_channels(plan.guild_id)
+                            refreshed_map = {channel.id: channel for channel in refreshed}
+                            misplaced = [
+                                channel_id
+                                for channel_id, _, new_parent in moved_channels
+                                if channel_id not in refreshed_map
+                                or refreshed_map[channel_id].parent_id != new_parent
+                            ]
+                            if misplaced:
+                                raise KookApiError(
+                                    "受保护的当前操作频道未能迁入新分组："
+                                    + "、".join(misplaced)
+                                )
                     for change in plan.changes:
                         await client.update_channel_name(change.channel_id, change.new_name)
                         applied.append(change)
@@ -669,6 +720,11 @@ class KookNameBeautifyPlugin(Star):
                             await client.update_channel_name(change.channel_id, change.old_name)
                         except Exception:
                             rollback_failed.append(change.new_name)
+                    for channel_id, old_parent, _ in reversed(moved_channels):
+                        try:
+                            await client.update_channel_parent(channel_id, old_parent)
+                        except Exception:
+                            rollback_failed.append(channel_id)
                     for item in reversed(created):
                         try:
                             await client.delete_channel(item.channel_id)

@@ -190,6 +190,16 @@ class KookApiClient:
             json_body={"channel_id": str(channel_id), "name": str(name)},
         )
 
+    async def update_channel_parent(self, channel_id: str, parent_id: str = "") -> None:
+        await self._request(
+            "POST",
+            "channel/update",
+            json_body={
+                "channel_id": str(channel_id),
+                "parent_id": str(parent_id).strip() or "0",
+            },
+        )
+
     async def create_channel(
         self,
         guild_id: str,

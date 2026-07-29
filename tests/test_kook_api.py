@@ -106,6 +106,22 @@ class KookApiClientTests(unittest.IsolatedAsyncioTestCase):
             [("POST", "channel/update", None, {"channel_id": "123", "name": "💬・聊天"})],
         )
 
+    async def test_update_channel_parent_uses_official_parent_id_parameter(self):
+        client = FakeKookApiClient()
+        await client.update_channel_parent("123", "category-456")
+        await client.update_channel_parent("123", "")
+        self.assertEqual(
+            client.calls,
+            [
+                ("POST", "channel/update", None, {
+                    "channel_id": "123", "parent_id": "category-456"
+                }),
+                ("POST", "channel/update", None, {
+                    "channel_id": "123", "parent_id": "0"
+                }),
+            ],
+        )
+
     async def test_create_category_text_and_voice_use_official_payloads(self):
         client = FakeKookApiClient()
         category = await client.create_channel("guild", "COMMUNITY", "category")

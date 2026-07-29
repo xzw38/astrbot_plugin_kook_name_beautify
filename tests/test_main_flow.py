@@ -100,6 +100,16 @@ class FakeClient:
             is_category=old.is_category,
         )
 
+    async def update_channel_parent(self, channel_id, parent_id=""):
+        old = self.channels[channel_id]
+        self.channels[channel_id] = Channel(
+            id=old.id,
+            name=old.name,
+            type=old.type,
+            parent_id=parent_id,
+            is_category=old.is_category,
+        )
+
     async def delete_channel(self, channel_id):
         self.deleted.append(channel_id)
         self.channels.pop(channel_id)
@@ -202,13 +212,17 @@ class MainFlowTests(unittest.IsolatedAsyncioTestCase):
             changes=[],
             creates=[CreateChange("newcat", "赛博娱乐区", "category")],
             deletes=[DeleteChange("old", "旧娱乐频道", "text")],
+            protected_channel_ids=("current",),
         )
 
         result = await plugin._replace_plan(FakeEvent(), plan.id)
         self.assertIn("永久删除 1", result)
         self.assertIn("current", client.channels)
         self.assertNotIn("old", client.channels)
-        self.assertTrue(any(channel.name == "赛博娱乐区" for channel in client.channels.values()))
+        new_category = next(
+            channel for channel in client.channels.values() if channel.name == "赛博娱乐区"
+        )
+        self.assertEqual(client.channels["current"].parent_id, new_category.id)
 
     async def test_replacement_checks_parent_before_deleting_old_channels(self):
         client = FakeClient([
@@ -232,6 +246,42 @@ class MainFlowTests(unittest.IsolatedAsyncioTestCase):
             await plugin._replace_plan(FakeEvent(), plan.id)
         self.assertEqual(set(client.channels), {"current", "old"})
         self.assertFalse(plan.applied)
+
+    async def test_full_replacement_moves_current_channel_and_deletes_old_category(self):
+        client = FakeClient([
+            Channel("oldcat", "旧分组", 0, is_category=True),
+            Channel("current", "机器人操作台", 1, parent_id="oldcat"),
+            Channel("old", "旧频道", 1, parent_id="oldcat"),
+        ])
+        plugin = self.make_plugin(client)
+        plan = plugin.plans.create(
+            guild_id="guild",
+            user_id="admin",
+            instruction="全部替换成赛博朋克模板",
+            changes=[],
+            creates=[
+                CreateChange("newcat", "赛博都市", "category"),
+                CreateChange("newchat", "霓虹广场", "text", parent_ref="newcat"),
+            ],
+            deletes=[
+                DeleteChange("old", "旧频道", "text"),
+                DeleteChange("oldcat", "旧分组", "category"),
+            ],
+            protected_channel_ids=("current",),
+        )
+
+        result = await plugin._replace_plan(FakeEvent(), plan.id)
+        self.assertIn("永久删除 2", result)
+        self.assertNotIn("old", client.channels)
+        self.assertNotIn("oldcat", client.channels)
+        new_category = next(
+            channel for channel in client.channels.values() if channel.name == "赛博都市"
+        )
+        self.assertEqual(client.channels["current"].parent_id, new_category.id)
+        new_chat = next(
+            channel for channel in client.channels.values() if channel.name == "霓虹广场"
+        )
+        self.assertEqual(new_chat.parent_id, new_category.id)
 
     async def test_non_admin_cannot_plan_permanent_delete(self):
         client = FakeClient([Channel("old", "待删除频道", 1)])

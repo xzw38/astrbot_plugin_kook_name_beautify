@@ -9,6 +9,8 @@ from beautify import (
     extract_explicit_channel_ids,
     instruction_requires_creation,
     instruction_requires_deletion,
+    instruction_requires_full_replacement,
+    instruction_requires_grouped_template,
     parse_complete_plan,
     parse_rename_plan,
     parse_structure_plan,
@@ -172,6 +174,56 @@ class RenamePlanTests(unittest.TestCase):
                 require_creates=True,
                 require_deletes=True,
                 protected_channel_ids=("current",),
+            )
+
+    def test_full_replacement_requires_grouped_template_and_all_old_items(self):
+        self.assertTrue(instruction_requires_full_replacement("全部替换成赛博朋克风"))
+        self.assertTrue(instruction_requires_grouped_template("给我新建一个赛博朋克模板"))
+        channels = CHANNELS + [Channel("current", "机器人操作台", 1, parent_id="cat")]
+        incomplete = {
+            "renames": [],
+            "creates": [
+                {"temp_id": "newcat", "name": "赛博都市", "kind": "category"},
+                {
+                    "temp_id": "newchat",
+                    "name": "霓虹广场",
+                    "kind": "text",
+                    "parent_ref": "newcat",
+                },
+            ],
+            "deletes": [{"channel_id": "text"}, {"channel_id": "voice"}],
+        }
+        with self.assertRaisesRegex(PlanError, "遗漏了必须删除"):
+            parse_complete_plan(
+                json.dumps(incomplete, ensure_ascii=False),
+                channels,
+                require_creates=True,
+                require_deletes=True,
+                require_grouped_template=True,
+                require_full_replacement=True,
+                protected_channel_ids=("current",),
+            )
+
+        incomplete["deletes"].append({"channel_id": "cat"})
+        _, creates, deletes = parse_complete_plan(
+            json.dumps(incomplete, ensure_ascii=False),
+            channels,
+            require_creates=True,
+            require_deletes=True,
+            require_grouped_template=True,
+            require_full_replacement=True,
+            protected_channel_ids=("current",),
+        )
+        self.assertEqual([item.kind for item in creates], ["category", "text"])
+        self.assertEqual([item.kind for item in deletes], ["text", "voice", "category"])
+
+    def test_template_requires_category_without_explicit_group_wording(self):
+        with self.assertRaisesRegex(PlanError, "没有创建任何分组"):
+            parse_structure_plan(
+                '{"renames":[],"creates":['
+                '{"temp_id":"chat","name":"霓虹广场","kind":"text"}]}',
+                CHANNELS,
+                require_grouped_template=True,
             )
 
     def test_explicit_numeric_parent_is_allowed_for_kook_validation(self):
