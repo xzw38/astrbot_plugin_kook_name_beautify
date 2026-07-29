@@ -47,7 +47,7 @@ except ImportError:  # Allow direct local imports during standalone development.
     from kook_api import KookApiClient, KookApiError
 
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 
 @register(
@@ -97,6 +97,46 @@ class KookNameBeautifyPlugin(Star):
     def _debug(self, message: str, *args: Any) -> None:
         if self.debug_logging:
             logger.info(message, *args)
+
+    async def _verify_created_channel_parents(
+        self,
+        client: KookApiClient,
+        guild_id: str,
+        created: list[CreatedChannel],
+    ) -> None:
+        expected = {
+            item.channel_id: item
+            for item in created
+            if item.kind != "category" and item.parent_id
+        }
+        if not expected:
+            return
+        channels = await client.list_channels(guild_id)
+        actual_parents = {channel.id: channel.parent_id for channel in channels}
+        mismatches = [
+            item
+            for channel_id, item in expected.items()
+            if str(actual_parents.get(channel_id, "") or "") != item.parent_id
+        ]
+        if not mismatches:
+            self._debug(
+                "[KOOK Beautify] parent verification success guild=%s channels=%s",
+                guild_id,
+                len(expected),
+            )
+            return
+        for item in mismatches:
+            logger.error(
+                "[KOOK Beautify] parent verification failed guild=%s channel=%s name=%r expected=%s actual=%s",
+                guild_id,
+                item.channel_id,
+                item.name,
+                item.parent_id,
+                actual_parents.get(item.channel_id, "missing") or "root",
+            )
+        raise KookApiError(
+            "新频道未进入计划分组：" + "、".join(item.name for item in mismatches[:8])
+        )
 
     @staticmethod
     def _sender_id(event: AstrMessageEvent) -> str:
@@ -597,6 +637,9 @@ class KookNameBeautifyPlugin(Star):
                             item.kind,
                             parent_id,
                         ))
+                    await self._verify_created_channel_parents(
+                        client, plan.guild_id, created
+                    )
                     for change in plan.changes:
                         await client.update_channel_name(change.channel_id, change.new_name)
                         applied.append(change)
@@ -743,6 +786,9 @@ class KookNameBeautifyPlugin(Star):
                             item.temp_id,
                             channel.id,
                         )
+                    await self._verify_created_channel_parents(
+                        client, plan.guild_id, created
+                    )
                     for index, change in enumerate(plan.changes, start=1):
                         self._debug(
                             "[KOOK Beautify] update start plan=%s item=%s/%s channel=%s old=%r new=%r",

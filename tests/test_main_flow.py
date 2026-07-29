@@ -59,9 +59,10 @@ class FakeEvent:
 
 
 class FakeClient:
-    def __init__(self, channels, fail_create_name=""):
+    def __init__(self, channels, fail_create_name="", ignore_parent=False):
         self.channels = {item.id: item for item in channels}
         self.fail_create_name = fail_create_name
+        self.ignore_parent = ignore_parent
         self.next_id = 1
         self.deleted = []
 
@@ -83,7 +84,7 @@ class FakeClient:
             id=channel_id,
             name=name,
             type=0 if kind == "category" else (2 if kind == "voice" else 1),
-            parent_id=kwargs.get("parent_id", ""),
+            parent_id="" if self.ignore_parent else kwargs.get("parent_id", ""),
             is_category=kind == "category",
         )
         self.channels[channel_id] = channel
@@ -159,6 +160,20 @@ class MainFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.channels["old"].name, "旧名称")
         self.assertFalse(plan.applied)
 
+    async def test_apply_rejects_and_cleans_up_misplaced_new_channel(self):
+        client = FakeClient([Channel("old", "旧名称", 1)], ignore_parent=True)
+        plugin = self.make_plugin(client)
+        plan = self.make_plan(plugin, [
+            CreateChange("cat", "新分组", "category"),
+            CreateChange("chat", "新聊天", "text", parent_ref="cat"),
+        ])
+
+        with self.assertRaisesRegex(KookApiError, "新频道未进入计划分组"):
+            await plugin._apply_plan(FakeEvent(), plan.id)
+        self.assertEqual(set(client.channels), {"old"})
+        self.assertEqual(client.channels["old"].name, "旧名称")
+        self.assertFalse(plan.applied)
+
     async def test_rollback_refuses_category_with_external_child(self):
         client = FakeClient([Channel("old", "旧名称", 1)])
         plugin = self.make_plugin(client)
@@ -194,6 +209,29 @@ class MainFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("current", client.channels)
         self.assertNotIn("old", client.channels)
         self.assertTrue(any(channel.name == "赛博娱乐区" for channel in client.channels.values()))
+
+    async def test_replacement_checks_parent_before_deleting_old_channels(self):
+        client = FakeClient([
+            Channel("current", "机器人操作台", 1),
+            Channel("old", "旧频道", 1),
+        ], ignore_parent=True)
+        plugin = self.make_plugin(client)
+        plan = plugin.plans.create(
+            guild_id="guild",
+            user_id="admin",
+            instruction="套上新模板，旧频道都不要",
+            changes=[],
+            creates=[
+                CreateChange("cat", "新分组", "category"),
+                CreateChange("chat", "新聊天", "text", parent_ref="cat"),
+            ],
+            deletes=[DeleteChange("old", "旧频道", "text")],
+        )
+
+        with self.assertRaisesRegex(KookApiError, "删除旧频道前失败"):
+            await plugin._replace_plan(FakeEvent(), plan.id)
+        self.assertEqual(set(client.channels), {"current", "old"})
+        self.assertFalse(plan.applied)
 
     async def test_non_admin_cannot_plan_permanent_delete(self):
         client = FakeClient([Channel("old", "待删除频道", 1)])

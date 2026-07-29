@@ -196,6 +196,23 @@ class RenamePlanTests(unittest.TestCase):
                 CHANNELS,
             )
 
+    def test_new_categories_require_every_new_child_to_have_parent_ref(self):
+        with self.assertRaisesRegex(PlanError, "没有 parent_ref"):
+            parse_structure_plan(
+                '{"renames":[],"creates":['
+                '{"temp_id":"cat2","name":"新分组","kind":"category"},'
+                '{"temp_id":"chat","name":"新聊天","kind":"text"}]}',
+                CHANNELS,
+            )
+
+    def test_root_channel_is_allowed_when_plan_creates_no_category(self):
+        _, creates = parse_structure_plan(
+            '{"renames":[],"creates":['
+            '{"temp_id":"chat","name":"根频道","kind":"text"}]}',
+            CHANNELS,
+        )
+        self.assertEqual(creates[0].parent_ref, "")
+
     def test_category_parent_and_invalid_voice_settings_are_rejected(self):
         with self.assertRaisesRegex(PlanError, "不能设置 parent_ref"):
             parse_structure_plan(
