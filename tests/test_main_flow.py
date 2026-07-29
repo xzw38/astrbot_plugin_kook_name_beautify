@@ -59,10 +59,17 @@ class FakeEvent:
 
 
 class FakeClient:
-    def __init__(self, channels, fail_create_name="", ignore_parent=False):
+    def __init__(
+        self,
+        channels,
+        fail_create_name="",
+        ignore_parent=False,
+        category_delete_noops=0,
+    ):
         self.channels = {item.id: item for item in channels}
         self.fail_create_name = fail_create_name
         self.ignore_parent = ignore_parent
+        self.category_delete_noops = category_delete_noops
         self.next_id = 1
         self.deleted = []
 
@@ -111,6 +118,14 @@ class FakeClient:
         )
 
     async def delete_channel(self, channel_id):
+        channel = self.channels.get(channel_id)
+        if (
+            channel is not None
+            and channel.kind == "category"
+            and self.category_delete_noops > 0
+        ):
+            self.category_delete_noops -= 1
+            return
         self.deleted.append(channel_id)
         self.channels.pop(channel_id)
 
@@ -248,11 +263,14 @@ class MainFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(plan.applied)
 
     async def test_full_replacement_moves_current_channel_and_deletes_old_category(self):
-        client = FakeClient([
-            Channel("oldcat", "旧分组", 0, is_category=True),
-            Channel("current", "机器人操作台", 1, parent_id="oldcat"),
-            Channel("old", "旧频道", 1, parent_id="oldcat"),
-        ])
+        client = FakeClient(
+            [
+                Channel("oldcat", "旧分组", 0, is_category=True),
+                Channel("current", "机器人操作台", 1, parent_id="oldcat"),
+                Channel("old", "旧频道", 1, parent_id="oldcat"),
+            ],
+            category_delete_noops=1,
+        )
         plugin = self.make_plugin(client)
         plan = plugin.plans.create(
             guild_id="guild",
@@ -274,6 +292,7 @@ class MainFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("永久删除 2", result)
         self.assertNotIn("old", client.channels)
         self.assertNotIn("oldcat", client.channels)
+        self.assertEqual(client.category_delete_noops, 0)
         new_category = next(
             channel for channel in client.channels.values() if channel.name == "赛博都市"
         )

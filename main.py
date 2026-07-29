@@ -51,7 +51,7 @@ except ImportError:  # Allow direct local imports during standalone development.
     from kook_api import KookApiClient, KookApiError
 
 
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 
 
 @register(
@@ -141,6 +141,83 @@ class KookNameBeautifyPlugin(Star):
         raise KookApiError(
             "新频道未进入计划分组：" + "、".join(item.name for item in mismatches[:8])
         )
+
+    async def _delete_and_verify_replacement_targets(
+        self,
+        client: KookApiClient,
+        guild_id: str,
+        targets: list[DeleteChange],
+    ) -> tuple[list[DeleteChange], list[DeleteChange]]:
+        target_map = {item.channel_id: item for item in targets}
+        target_ids = set(target_map)
+        last_errors: dict[str, str] = {}
+        for attempt in range(1, 5):
+            current = await client.list_channels(guild_id)
+            current_map = {channel.id: channel for channel in current}
+            remaining = [item for item in targets if item.channel_id in current_map]
+            if not remaining:
+                return list(targets), []
+            remaining_ids = {item.channel_id for item in remaining}
+            self._debug(
+                "[KOOK Beautify] replacement delete pass guild=%s attempt=%s/4 remaining=%s",
+                guild_id,
+                attempt,
+                list(remaining_ids),
+            )
+            for item in sorted(remaining, key=lambda value: value.kind == "category"):
+                if item.kind == "category":
+                    remaining_children = [
+                        channel
+                        for channel in current
+                        if channel.parent_id == item.channel_id
+                        and channel.id in remaining_ids
+                    ]
+                    if remaining_children:
+                        continue
+                    outside_children = [
+                        channel.name
+                        for channel in current
+                        if channel.parent_id == item.channel_id
+                        and channel.id not in target_ids
+                    ]
+                    if outside_children:
+                        last_errors[item.channel_id] = (
+                            "分组中出现了未纳入替换方案的频道："
+                            + "、".join(outside_children[:8])
+                        )
+                        continue
+                try:
+                    await client.delete_channel(item.channel_id)
+                    last_errors.pop(item.channel_id, None)
+                except Exception as exc:
+                    last_errors[item.channel_id] = str(exc)
+                    logger.warning(
+                        "[KOOK Beautify] replacement delete retry guild=%s channel=%s kind=%s attempt=%s/4 error=%s",
+                        guild_id,
+                        item.channel_id,
+                        item.kind,
+                        attempt,
+                        exc,
+                    )
+            if attempt < 4:
+                await asyncio.sleep(
+                    min(1.0, max(0.25, self.request_interval_ms / 1000))
+                )
+
+        final_channels = await client.list_channels(guild_id)
+        final_ids = {channel.id for channel in final_channels}
+        deleted = [item for item in targets if item.channel_id not in final_ids]
+        remaining = [item for item in targets if item.channel_id in final_ids]
+        for item in remaining:
+            logger.error(
+                "[KOOK Beautify] replacement delete verification failed guild=%s channel=%s kind=%s name=%r error=%s",
+                guild_id,
+                item.channel_id,
+                item.kind,
+                item.old_name,
+                last_errors.get(item.channel_id, "KOOK 返回成功但频道仍存在"),
+            )
+        return deleted, remaining
 
     @staticmethod
     def _sender_id(event: AstrMessageEvent) -> str:
@@ -694,16 +771,18 @@ class KookNameBeautifyPlugin(Star):
                     for change in plan.changes:
                         await client.update_channel_name(change.channel_id, change.new_name)
                         applied.append(change)
-                    for item in plan.deletes:
-                        self._debug(
-                            "[KOOK Beautify] replacement permanent delete plan=%s channel=%s kind=%s name=%r",
-                            plan.id,
-                            item.channel_id,
-                            item.kind,
-                            item.old_name,
+                    deleted, remaining = await self._delete_and_verify_replacement_targets(
+                        client, plan.guild_id, plan.deletes
+                    )
+                    permanently_deleted.extend(deleted)
+                    if remaining:
+                        details = "、".join(
+                            f"{item.old_name}({item.channel_id})" for item in remaining[:8]
                         )
-                        await client.delete_channel(item.channel_id)
-                        permanently_deleted.append(item)
+                        raise KookApiError(
+                            "KOOK 多次删除并刷新验证后，以下旧频道或分组仍然存在："
+                            + details
+                        )
                 except Exception as exc:
                     if permanently_deleted:
                         plan.applied = True
