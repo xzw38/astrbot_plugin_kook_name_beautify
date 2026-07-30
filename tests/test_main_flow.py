@@ -337,6 +337,34 @@ class MainFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("voice", client.channels)
         self.assertNotIn("voicecat", client.channels)
 
+    async def test_full_replacement_reuses_protected_category_without_moving_current(self):
+        client = FakeClient([
+            Channel("cat", "保留分组", 0, is_category=True),
+            Channel("current", "机器人命令", 1, parent_id="cat"),
+            Channel("old", "旧语音", 2, parent_id="cat"),
+        ])
+        plugin = self.make_plugin(client)
+        plan = plugin.plans.create(
+            guild_id="guild",
+            user_id="admin",
+            instruction="分组不动，其他全部替换",
+            changes=[],
+            creates=[CreateChange("newtext", "冬日大厅", "text", parent_ref="cat")],
+            deletes=[DeleteChange("old", "旧语音", "voice")],
+            protected_channel_ids=("cat", "current"),
+            movable_channel_ids=(),
+        )
+
+        await plugin._replace_plan(FakeEvent(), plan.id)
+        self.assertIn("cat", client.channels)
+        self.assertEqual(client.channels["current"].parent_id, "cat")
+        self.assertNotIn("old", client.channels)
+        new_text = next(
+            channel for channel in client.channels.values()
+            if channel.name == "冬日大厅"
+        )
+        self.assertEqual(new_text.parent_id, "cat")
+
     async def test_non_admin_cannot_plan_permanent_delete(self):
         client = FakeClient([Channel("old", "待删除频道", 1)])
         plugin = self.make_plugin(client)
@@ -380,7 +408,10 @@ class MainFlowTests(unittest.IsolatedAsyncioTestCase):
         ])
         validation_errors = []
 
-        async def generate(event, instruction, channels, validation_error="", protected_channel_ids=()):
+        async def generate(
+            event, instruction, channels, validation_error="",
+            protected_channel_ids=(), protected_kinds=(),
+        ):
             validation_errors.append(validation_error)
             return next(outputs)
 

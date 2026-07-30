@@ -11,10 +11,12 @@ from beautify import (
     instruction_requires_deletion,
     instruction_requires_full_replacement,
     instruction_requires_grouped_template,
+    instruction_preserved_kinds,
     instruction_preserves_text_scope,
     parse_complete_plan,
     parse_rename_plan,
     parse_structure_plan,
+    protected_scope_channel_ids,
     protected_text_scope_channel_ids,
 )
 
@@ -279,7 +281,7 @@ class RenamePlanTests(unittest.TestCase):
             "kind": "text",
             "parent_ref": "winter",
         })
-        with self.assertRaisesRegex(PlanError, "不能新建文字频道"):
+        with self.assertRaisesRegex(PlanError, "不能新建这些类型"):
             parse_complete_plan(
                 json.dumps(payload, ensure_ascii=False),
                 channels,
@@ -287,9 +289,126 @@ class RenamePlanTests(unittest.TestCase):
                 require_deletes=True,
                 require_grouped_template=True,
                 require_full_replacement=True,
-                preserve_text_scope=True,
+                protected_kinds=("text",),
                 protected_channel_ids=protected,
             )
+
+    def test_selective_protection_supports_voice_and_category_scopes(self):
+        channels = [
+            Channel("textcat", "文字区", 0, is_category=True),
+            Channel("text", "聊天", 1, parent_id="textcat"),
+            Channel("voicecat", "语音区", 0, is_category=True),
+            Channel("voice", "开黑", 2, parent_id="voicecat"),
+        ]
+        self.assertEqual(
+            instruction_preserved_kinds("语音频道保持原样，其他全部替换"),
+            {"voice"},
+        )
+        self.assertEqual(
+            protected_scope_channel_ids("不碰语音，其他全部替换", channels),
+            {"voice", "voicecat"},
+        )
+        self.assertEqual(
+            instruction_preserved_kinds("不动分组，只替换频道"),
+            {"category"},
+        )
+        self.assertEqual(
+            protected_scope_channel_ids("不动分组，只替换频道", channels),
+            {"textcat", "voicecat"},
+        )
+
+    def test_preservation_is_clause_aware_and_explicit_replacement_wins(self):
+        self.assertEqual(
+            instruction_preserved_kinds("文字不动，语音全部替换"),
+            {"text"},
+        )
+        self.assertEqual(
+            instruction_preserved_kinds("不动文字和语音频道，其他全部替换"),
+            {"text", "voice"},
+        )
+        self.assertEqual(
+            instruction_preserved_kinds("除了语音频道以外，其他全部替换"),
+            {"voice"},
+        )
+        self.assertNotIn(
+            "text", instruction_preserved_kinds("文字频道也替换，不保留文字")
+        )
+
+    def test_voice_protection_discards_ai_mutations_and_rejects_new_voice(self):
+        channels = [
+            Channel("textcat", "文字区", 0, is_category=True),
+            Channel("text", "聊天", 1, parent_id="textcat"),
+            Channel("voicecat", "语音区", 0, is_category=True),
+            Channel("voice", "开黑", 2, parent_id="voicecat"),
+        ]
+        instruction = "不动语音频道，其他全部替换"
+        protected = protected_scope_channel_ids(instruction, channels)
+        payload = {
+            "renames": [{"channel_id": "voice", "new_name": "错误改名"}],
+            "creates": [
+                {"temp_id": "newcat", "name": "新文字区", "kind": "category"},
+                {
+                    "temp_id": "newtext", "name": "新聊天", "kind": "text",
+                    "parent_ref": "newcat",
+                },
+            ],
+            "deletes": [{"channel_id": item.id} for item in channels],
+        }
+        changes, creates, deletes = parse_complete_plan(
+            json.dumps(payload, ensure_ascii=False),
+            channels,
+            require_creates=True,
+            require_deletes=True,
+            require_grouped_template=True,
+            require_full_replacement=True,
+            protected_kinds=("voice",),
+            protected_channel_ids=protected,
+        )
+        self.assertEqual(changes, [])
+        self.assertEqual([item.kind for item in creates], ["category", "text"])
+        self.assertEqual([item.channel_id for item in deletes], ["text", "textcat"])
+
+        payload["creates"].append({
+            "temp_id": "newvoice", "name": "新语音", "kind": "voice",
+            "parent_ref": "newcat",
+        })
+        with self.assertRaisesRegex(PlanError, "不能新建这些类型"):
+            parse_complete_plan(
+                json.dumps(payload, ensure_ascii=False),
+                channels,
+                require_creates=True,
+                require_deletes=True,
+                require_grouped_template=True,
+                require_full_replacement=True,
+                protected_kinds=("voice",),
+                protected_channel_ids=protected,
+            )
+
+    def test_protected_categories_can_host_replacement_template(self):
+        channels = [
+            Channel("cat", "保留分组", 0, is_category=True),
+            Channel("old", "旧文字", 1, parent_id="cat"),
+        ]
+        payload = {
+            "renames": [],
+            "creates": [{
+                "temp_id": "newtext", "name": "新文字", "kind": "text",
+                "parent_ref": "cat",
+            }],
+            "deletes": [{"channel_id": "old"}],
+        }
+        _, creates, deletes = parse_complete_plan(
+            json.dumps(payload, ensure_ascii=False),
+            channels,
+            require_creates=True,
+            require_deletes=True,
+            require_grouped_template=True,
+            require_full_replacement=True,
+            protected_kinds=("category",),
+            protected_channel_ids=("cat",),
+        )
+        self.assertEqual(creates[0].parent_ref, "cat")
+        self.assertEqual([item.channel_id for item in deletes], ["old"])
 
     def test_template_requires_category_without_explicit_group_wording(self):
         with self.assertRaisesRegex(PlanError, "没有创建任何分组"):

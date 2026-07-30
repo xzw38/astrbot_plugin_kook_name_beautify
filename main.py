@@ -25,8 +25,8 @@ try:
         instruction_requires_deletion,
         instruction_requires_full_replacement,
         instruction_requires_grouped_template,
-        instruction_preserves_text_scope,
-        protected_text_scope_channel_ids,
+        instruction_preserved_kinds,
+        protected_scope_channel_ids,
         parse_complete_plan,
         parse_structure_plan,
     )
@@ -47,15 +47,15 @@ except ImportError:  # Allow direct local imports during standalone development.
         instruction_requires_deletion,
         instruction_requires_full_replacement,
         instruction_requires_grouped_template,
-        instruction_preserves_text_scope,
-        protected_text_scope_channel_ids,
+        instruction_preserved_kinds,
+        protected_scope_channel_ids,
         parse_complete_plan,
         parse_structure_plan,
     )
     from kook_api import KookApiClient, KookApiError
 
 
-__version__ = "0.6.0"
+__version__ = "0.6.1"
 
 
 @register(
@@ -464,12 +464,15 @@ class KookNameBeautifyPlugin(Star):
         channels: list[Channel],
         validation_error: str = "",
         protected_channel_ids: tuple[str, ...] = (),
+        protected_kinds: tuple[str, ...] = (),
     ) -> str:
         provider_id = await self._provider_id(event)
         system_prompt = PLANNER_SYSTEM_PROMPT
         if self.custom_planner_prompt:
             system_prompt += "\n\n管理员补充规范：\n" + self.custom_planner_prompt
-        prompt = build_planner_prompt(instruction, channels, protected_channel_ids)
+        prompt = build_planner_prompt(
+            instruction, channels, protected_channel_ids, protected_kinds
+        )
         if validation_error:
             prompt += (
                 "\n\n上一次方案校验失败："
@@ -510,7 +513,7 @@ class KookNameBeautifyPlugin(Star):
         require_creates = instruction_requires_creation(instruction)
         require_full_replacement = instruction_requires_full_replacement(instruction)
         require_grouped_template = instruction_requires_grouped_template(instruction)
-        preserve_text_scope = instruction_preserves_text_scope(instruction)
+        protected_kinds = tuple(sorted(instruction_preserved_kinds(instruction)))
         if require_full_replacement:
             require_creates = True
         require_deletes = instruction_requires_deletion(instruction)
@@ -528,17 +531,25 @@ class KookNameBeautifyPlugin(Star):
                 raise KookApiError("这个服务器没有返回可美化的频道。")
             if require_deletes and current_channel_id not in {channel.id for channel in channels}:
                 raise PlanError("当前操作频道未出现在 KOOK 实时频道列表中，为避免误删已拒绝批量替换。")
-            requested_protected_ids = protected_text_scope_channel_ids(
+            requested_protected_ids = protected_scope_channel_ids(
                 instruction, channels
             )
             protected_ids = set(requested_protected_ids)
             if require_deletes:
                 protected_ids.add(current_channel_id)
             protected_channel_ids = tuple(sorted(protected_ids))
+            current_channel = next(
+                (channel for channel in channels if channel.id == current_channel_id),
+                None,
+            )
             movable_channel_ids = (
                 (current_channel_id,)
                 if require_full_replacement
                 and current_channel_id not in requested_protected_ids
+                and (
+                    current_channel is None
+                    or current_channel.parent_id not in requested_protected_ids
+                )
                 else ()
             )
             logger.info(
@@ -560,8 +571,9 @@ class KookNameBeautifyPlugin(Star):
                 sum(channel.kind == "voice" for channel in channels),
             )
             self._debug(
-                "[KOOK Beautify] protected scope guild=%s requested=%s movable=%s",
+                "[KOOK Beautify] protected scope guild=%s kinds=%s requested=%s movable=%s",
                 resolved_guild_id,
+                list(protected_kinds),
                 list(protected_channel_ids),
                 list(movable_channel_ids),
             )
@@ -571,6 +583,7 @@ class KookNameBeautifyPlugin(Star):
                 channels,
                 validation_error=validation_error,
                 protected_channel_ids=protected_channel_ids,
+                protected_kinds=protected_kinds,
             )
             self._debug(
                 "[KOOK Beautify] AI plan output guild=%s attempt=%s/2 require_creates=%s explicit_parents=%s output=%r",
@@ -590,7 +603,7 @@ class KookNameBeautifyPlugin(Star):
                     require_deletes=require_deletes,
                     require_grouped_template=require_grouped_template,
                     require_full_replacement=require_full_replacement,
-                    preserve_text_scope=preserve_text_scope,
+                    protected_kinds=protected_kinds,
                     allowed_parent_refs=explicit_parent_refs,
                     protected_channel_ids=protected_channel_ids,
                 )
@@ -835,7 +848,7 @@ class KookNameBeautifyPlugin(Star):
                     await self._verify_created_channel_parents(
                         client, plan.guild_id, created
                     )
-                    if full_replacement:
+                    if full_replacement and movable_ids:
                         new_category = next(
                             (item for item in created if item.kind == "category"),
                             None,
