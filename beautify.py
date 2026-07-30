@@ -266,6 +266,13 @@ def instruction_requires_creation(instruction: str) -> bool:
     normalized = re.sub(r"\s+", "", str(instruction or "")).lower()
     if any(marker in normalized for marker in ("不要新建", "不要创建", "无需新建", "不需要创建", "只改名")):
         return False
+    positive_replacement = re.sub(
+        r"(?:不|不要|无需|不用)(?:再)?替换",
+        "",
+        normalized,
+    )
+    if "替换" in positive_replacement:
+        return True
     return any(marker in normalized for marker in (
         "新建", "创建", "新增", "添加频道", "增加频道",
         "完整频道结构", "从零设计", "设计一套频道", "新模板", "生成一套",
@@ -309,7 +316,8 @@ _KIND_ALIASES = {
 }
 _PRESERVE_MARKERS = (
     "保持原样", "原样保留", "完全不动", "完全不碰", "不要修改", "不要改",
-    "不要动", "不修改", "不改动", "不改", "不动", "不碰", "保留",
+    "不要替换", "不替换", "不要动", "不修改", "不改动", "不改", "不动",
+    "不碰", "保留",
 )
 
 
@@ -613,28 +621,31 @@ def parse_complete_plan(
             for channel in channel_map.values()
             if channel.id not in protected_ids
         ]
-        rename_entries = payload.get("renames", [])
-        if isinstance(rename_entries, list):
-            payload = dict(payload)
-            payload["renames"] = [
-                entry
-                for entry in rename_entries
-                if not isinstance(entry, dict)
-                or str(entry.get("channel_id", "")).strip() not in protected_ids
-            ]
-            payload["deletes"] = entries
-            text = json.dumps(payload, ensure_ascii=False)
+    elif protected_ids:
+        entries = [
+            entry
+            for entry in entries
+            if not isinstance(entry, dict)
+            or str(entry.get("channel_id", "")).strip() not in protected_ids
+        ]
+    rename_entries = payload.get("renames", [])
     create_entries = payload.get("creates", [])
-    created_protected_kinds = {
-        str(entry.get("kind", "")).strip().lower()
-        for entry in create_entries
-        if isinstance(entry, dict)
-        and str(entry.get("kind", "")).strip().lower() in protected_kind_names
-    } if isinstance(create_entries, list) else set()
-    if created_protected_kinds:
-        kind_labels = {"category": "分组", "text": "文字频道", "voice": "语音频道"}
-        labels = "、".join(kind_labels[kind] for kind in sorted(created_protected_kinds))
-        raise PlanError(f"用户要求 {labels} 保持原样，方案不能新建这些类型。")
+    if isinstance(rename_entries, list) and isinstance(create_entries, list):
+        payload = dict(payload)
+        payload["renames"] = [
+            entry
+            for entry in rename_entries
+            if not isinstance(entry, dict)
+            or str(entry.get("channel_id", "")).strip() not in protected_ids
+        ]
+        payload["creates"] = [
+            entry
+            for entry in create_entries
+            if not isinstance(entry, dict)
+            or str(entry.get("kind", "")).strip().lower() not in protected_kind_names
+        ]
+        payload["deletes"] = entries
+        text = json.dumps(payload, ensure_ascii=False)
     deletes: list[DeleteChange] = []
     seen: set[str] = set()
     for index, entry in enumerate(entries, start=1):
