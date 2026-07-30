@@ -228,6 +228,7 @@ class MainFlowTests(unittest.IsolatedAsyncioTestCase):
             creates=[CreateChange("newcat", "赛博娱乐区", "category")],
             deletes=[DeleteChange("old", "旧娱乐频道", "text")],
             protected_channel_ids=("current",),
+            movable_channel_ids=("current",),
         )
 
         result = await plugin._replace_plan(FakeEvent(), plan.id)
@@ -286,6 +287,7 @@ class MainFlowTests(unittest.IsolatedAsyncioTestCase):
                 DeleteChange("oldcat", "旧分组", "category"),
             ],
             protected_channel_ids=("current",),
+            movable_channel_ids=("current",),
         )
 
         result = await plugin._replace_plan(FakeEvent(), plan.id)
@@ -301,6 +303,39 @@ class MainFlowTests(unittest.IsolatedAsyncioTestCase):
             channel for channel in client.channels.values() if channel.name == "霓虹广场"
         )
         self.assertEqual(new_chat.parent_id, new_category.id)
+
+    async def test_full_replacement_keeps_protected_text_area_unchanged(self):
+        client = FakeClient([
+            Channel("textcat", "文字·帖子", 0, is_category=True),
+            Channel("current", "日常聊天", 1, parent_id="textcat"),
+            Channel("voicecat", "旧语音区", 0, is_category=True),
+            Channel("voice", "旧语音", 2, parent_id="voicecat"),
+        ])
+        plugin = self.make_plugin(client)
+        plan = plugin.plans.create(
+            guild_id="guild",
+            user_id="admin",
+            instruction="文字频道和包含文字频道的分组保持原样，其他全部替换成冬日模板",
+            changes=[],
+            creates=[
+                CreateChange("winter", "冬日语音区", "category"),
+                CreateChange("snow", "雪夜围炉", "voice", parent_ref="winter"),
+            ],
+            deletes=[
+                DeleteChange("voice", "旧语音", "voice"),
+                DeleteChange("voicecat", "旧语音区", "category"),
+            ],
+            protected_channel_ids=("textcat", "current"),
+            movable_channel_ids=(),
+        )
+
+        await plugin._replace_plan(FakeEvent(), plan.id)
+        self.assertIn("textcat", client.channels)
+        self.assertIn("current", client.channels)
+        self.assertEqual(client.channels["textcat"].name, "文字·帖子")
+        self.assertEqual(client.channels["current"].parent_id, "textcat")
+        self.assertNotIn("voice", client.channels)
+        self.assertNotIn("voicecat", client.channels)
 
     async def test_non_admin_cannot_plan_permanent_delete(self):
         client = FakeClient([Channel("old", "待删除频道", 1)])

@@ -11,9 +11,11 @@ from beautify import (
     instruction_requires_deletion,
     instruction_requires_full_replacement,
     instruction_requires_grouped_template,
+    instruction_preserves_text_scope,
     parse_complete_plan,
     parse_rename_plan,
     parse_structure_plan,
+    protected_text_scope_channel_ids,
 )
 
 
@@ -220,6 +222,74 @@ class RenamePlanTests(unittest.TestCase):
             {item.channel_id for item in automatic_deletes},
             {"cat", "text", "voice"},
         )
+
+    def test_full_replacement_preserves_text_channels_and_their_categories(self):
+        instruction = (
+            "再来一套冬天感觉的频道美化，所有文字频道和包含文字频道的分组保持原样，"
+            "其他全部替换"
+        )
+        self.assertTrue(instruction_preserves_text_scope(instruction))
+        channels = [
+            Channel("textcat", "文字·帖子", 0, is_category=True),
+            Channel("text", "日常聊天", 1, parent_id="textcat"),
+            Channel("voicecat", "旧语音区", 0, is_category=True),
+            Channel("voice", "旧语音", 2, parent_id="voicecat"),
+        ]
+        protected = protected_text_scope_channel_ids(instruction, channels)
+        self.assertEqual(protected, {"textcat", "text"})
+        payload = {
+            "renames": [
+                {"channel_id": "textcat", "new_name": "❄️・文字·帖子"},
+                {"channel_id": "text", "new_name": "❄️・日常聊天"},
+            ],
+            "creates": [
+                {"temp_id": "winter", "name": "❄️・冬日语音", "kind": "category"},
+                {
+                    "temp_id": "snow_voice",
+                    "name": "☃️・雪夜围炉",
+                    "kind": "voice",
+                    "parent_ref": "winter",
+                },
+            ],
+            "deletes": [
+                {"channel_id": "textcat"},
+                {"channel_id": "text"},
+                {"channel_id": "voicecat"},
+                {"channel_id": "voice"},
+            ],
+        }
+        changes, _, deletes = parse_complete_plan(
+            json.dumps(payload, ensure_ascii=False),
+            channels,
+            require_creates=True,
+            require_deletes=True,
+            require_grouped_template=True,
+            require_full_replacement=True,
+            protected_channel_ids=protected,
+        )
+        self.assertEqual(changes, [])
+        self.assertEqual(
+            [item.channel_id for item in deletes],
+            ["voice", "voicecat"],
+        )
+
+        payload["creates"].append({
+            "temp_id": "winter_text",
+            "name": "冬日文字",
+            "kind": "text",
+            "parent_ref": "winter",
+        })
+        with self.assertRaisesRegex(PlanError, "不能新建文字频道"):
+            parse_complete_plan(
+                json.dumps(payload, ensure_ascii=False),
+                channels,
+                require_creates=True,
+                require_deletes=True,
+                require_grouped_template=True,
+                require_full_replacement=True,
+                preserve_text_scope=True,
+                protected_channel_ids=protected,
+            )
 
     def test_template_requires_category_without_explicit_group_wording(self):
         with self.assertRaisesRegex(PlanError, "没有创建任何分组"):

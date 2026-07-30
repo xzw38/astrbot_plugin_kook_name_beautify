@@ -25,6 +25,8 @@ try:
         instruction_requires_deletion,
         instruction_requires_full_replacement,
         instruction_requires_grouped_template,
+        instruction_preserves_text_scope,
+        protected_text_scope_channel_ids,
         parse_complete_plan,
         parse_structure_plan,
     )
@@ -45,13 +47,15 @@ except ImportError:  # Allow direct local imports during standalone development.
         instruction_requires_deletion,
         instruction_requires_full_replacement,
         instruction_requires_grouped_template,
+        instruction_preserves_text_scope,
+        protected_text_scope_channel_ids,
         parse_complete_plan,
         parse_structure_plan,
     )
     from kook_api import KookApiClient, KookApiError
 
 
-__version__ = "0.5.4"
+__version__ = "0.6.0"
 
 
 @register(
@@ -506,6 +510,7 @@ class KookNameBeautifyPlugin(Star):
         require_creates = instruction_requires_creation(instruction)
         require_full_replacement = instruction_requires_full_replacement(instruction)
         require_grouped_template = instruction_requires_grouped_template(instruction)
+        preserve_text_scope = instruction_preserves_text_scope(instruction)
         if require_full_replacement:
             require_creates = True
         require_deletes = instruction_requires_deletion(instruction)
@@ -513,7 +518,9 @@ class KookNameBeautifyPlugin(Star):
         current_channel_id = self._resolve_current_channel_id(event)
         if require_deletes and not current_channel_id:
             raise PlanError("无法识别当前操作频道，为避免批量替换时删掉回复通道，已拒绝生成方案。")
-        protected_channel_ids = (current_channel_id,) if require_deletes else ()
+        requested_protected_ids: set[str] = set()
+        protected_channel_ids: tuple[str, ...] = ()
+        movable_channel_ids: tuple[str, ...] = ()
         for attempt in range(2):
             async with self._api_client(token) as client:
                 channels = await client.list_channels(resolved_guild_id)
@@ -521,6 +528,19 @@ class KookNameBeautifyPlugin(Star):
                 raise KookApiError("这个服务器没有返回可美化的频道。")
             if require_deletes and current_channel_id not in {channel.id for channel in channels}:
                 raise PlanError("当前操作频道未出现在 KOOK 实时频道列表中，为避免误删已拒绝批量替换。")
+            requested_protected_ids = protected_text_scope_channel_ids(
+                instruction, channels
+            )
+            protected_ids = set(requested_protected_ids)
+            if require_deletes:
+                protected_ids.add(current_channel_id)
+            protected_channel_ids = tuple(sorted(protected_ids))
+            movable_channel_ids = (
+                (current_channel_id,)
+                if require_full_replacement
+                and current_channel_id not in requested_protected_ids
+                else ()
+            )
             logger.info(
                 "[KOOK Beautify] planning guild=%s channels=%s user=%s attempt=%s/2",
                 resolved_guild_id,
@@ -538,6 +558,12 @@ class KookNameBeautifyPlugin(Star):
                 ],
                 sum(channel.kind == "text" for channel in channels),
                 sum(channel.kind == "voice" for channel in channels),
+            )
+            self._debug(
+                "[KOOK Beautify] protected scope guild=%s requested=%s movable=%s",
+                resolved_guild_id,
+                list(protected_channel_ids),
+                list(movable_channel_ids),
             )
             ai_output = await self._generate_ai_plan(
                 event,
@@ -564,6 +590,7 @@ class KookNameBeautifyPlugin(Star):
                     require_deletes=require_deletes,
                     require_grouped_template=require_grouped_template,
                     require_full_replacement=require_full_replacement,
+                    preserve_text_scope=preserve_text_scope,
                     allowed_parent_refs=explicit_parent_refs,
                     protected_channel_ids=protected_channel_ids,
                 )
@@ -605,6 +632,7 @@ class KookNameBeautifyPlugin(Star):
             creates=creates,
             deletes=deletes,
             protected_channel_ids=protected_channel_ids,
+            movable_channel_ids=movable_channel_ids,
         )
 
     async def _create_deletion_plan(
@@ -722,7 +750,7 @@ class KookNameBeautifyPlugin(Star):
         permanently_deleted = []
         moved_channels: list[tuple[str, str, str]] = []
         full_replacement = instruction_requires_full_replacement(plan.instruction)
-        protected_ids = set(plan.protected_channel_ids)
+        movable_ids = set(plan.movable_channel_ids)
         async with self._mutation_lock:
             async with self._api_client(token) as client:
                 current_channels = await client.list_channels(plan.guild_id)
@@ -753,7 +781,7 @@ class KookNameBeautifyPlugin(Star):
                         for channel in current_channels
                         if channel.parent_id == item.channel_id
                         and channel.id not in delete_ids
-                        and not (full_replacement and channel.id in protected_ids)
+                        and not (full_replacement and channel.id in movable_ids)
                     ]
                     if outside_children:
                         raise PlanError(
@@ -815,7 +843,7 @@ class KookNameBeautifyPlugin(Star):
                         if new_category is None:
                             raise PlanError("全部替换方案没有可接收当前操作频道的新分组。")
                         for channel in current_channels:
-                            if channel.id not in protected_ids:
+                            if channel.id not in movable_ids:
                                 continue
                             self._debug(
                                 "[KOOK Beautify] replacement move protected channel=%s old_parent=%s new_parent=%s",
